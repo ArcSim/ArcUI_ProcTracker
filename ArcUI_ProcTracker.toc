@@ -1,0 +1,27 @@
+## Interface: 120001
+## Title: ArcUI ProcTracker
+## Notes: Deck proc tracking — DW, Tempest, DRE, and more. /pt for options.
+## Author: Arc
+## Version: 1.0.2
+## SavedVariables: ArcUI_ProcTrackerDB
+
+# Libraries
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+Libs\AceGUI-3.0\AceGUI-3.0.xml
+Libs\AceConfig-3.0\AceConfig-3.0.xml
+Libs\AceGUI-3.0-CollapsibleHeader\AceGUI-3.0-CollapsibleHeader.lua
+
+ArcUI_PT_Core.lua
+ArcUI_PT_Bar.lua
+ArcUI_PT_MSW.lua
+ArcUI_PT_DWDeck.lua
+ArcUI_PT_TempestDeck.lua
+ArcUI_PT_ElemTempestDeck.lua
+ArcUI_PT_DREDeck.lua
+ArcUI_PT_TempestDebug.lua
+ArcUI_PT_ElemTempestDebug.lua
+ArcUI_PT_DWDebug.lua
+ArcUI_PT_DREDebug.lua
