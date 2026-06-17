@@ -1,8 +1,8 @@
-## Interface: 120001
+## Interface: 120000, 120001, 120005, 120007
 ## Title: ArcUI ProcTracker
 ## Notes: Deck proc tracking — DW, Tempest, DRE, and more. /pt for options.
 ## Author: Arc
-## Version: 1.0.2
+## Version: 1.0.3
 ## SavedVariables: ArcUI_ProcTrackerDB
 
 # Libraries

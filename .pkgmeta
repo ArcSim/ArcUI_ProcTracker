@@ -5,6 +5,12 @@
 # exclude list used by package.ps1.
 package-as: ArcUI_ProcTracker
 
+# Use our formatted changelog for the CurseForge file notes (instead of the
+# packager's auto-generated commit-message list).
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
 ignore:
   - .git
   - .github
