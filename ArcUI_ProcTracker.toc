@@ -4,6 +4,7 @@
 ## Author: Arc
 ## Version: 1.0.3
 ## SavedVariables: ArcUI_ProcTrackerDB
+## X-Curse-Project-ID: 1516247
 
 # Libraries
 Libs\LibStub\LibStub.lua
