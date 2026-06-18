@@ -53,10 +53,12 @@ Releases are fully automated via **GitHub Actions + the BigWigs packager**
 
 1. Bump `## Version: X.Y.Z` in `ArcUI_ProcTracker.toc`.
 2. Add a `## X.Y.Z` section to **`CHANGELOG.md`** — this file IS the CurseForge changelog
-   (`.pkgmeta` `manual-changelog`). Format: `- **Title** — Description`, plain user-facing English.
+   (`.pkgmeta` `manual-changelog`). Follow the `wow-addon-dev` skill's `changelog-template.md`
+   (sections + `- **Title** — Description`, plain user-facing English).
 3. `luac -p` every touched Lua file.
-4. Commit.
-5. Tag and push. **The tag has NO "v" prefix** — the CurseForge file label is
+4. **Show the user the finished changelog and get explicit approval — never tag/push a release unseen.**
+5. Commit.
+6. Tag and push. **The tag has NO "v" prefix** — the CurseForge file label is
    `ArcUI_ProcTracker-{project-version}` and `{project-version}` is the tag verbatim, so `1.0.4`
    gives `ArcUI_ProcTracker-1.0.4` (a leading `v` would leak into the label):
    ```
