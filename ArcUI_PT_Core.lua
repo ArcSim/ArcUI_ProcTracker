@@ -513,9 +513,10 @@ local function BuildDeckOptionsGroup(entry)
         name = entry.name,
         args = {
 
-            -- ── DECK ENABLED ──────────────────────────────────────────────────
-            enableHeader = {
-                type = "header", name = "Deck", order = o(),
+            -- ── WIDGET (master toggle lives WITH the icon options; the header
+            -- is never hidden so a disabled deck can be re-enabled) ───────────
+            iconHeader = {
+                type = "header", name = "Widget", order = o(),
             },
             deckEnabled = {
                 type  = "toggle", name = "Show Icon Widget",
@@ -531,8 +532,56 @@ local function BuildDeckOptionsGroup(entry)
                     if w then if v then w:Show() else w:Hide() end end
                 end,
             },
+            lockPosition = {
+                type  = "toggle", name = "Lock Position",
+                desc  = "Prevent the icon from being dragged. When locked the frame is click-through.",
+                order = o(), width = "half",
+                hidden = iconHidden,
+                get   = function() return db().lockPosition == true end,
+                set   = function(_, v)
+                    db().lockPosition = v
+                    local wf = entry.widget
+                    if wf then
+                        wf:SetMovable(not v)
+                        wf:EnableMouse(not v)
+                    end
+                end,
+            },
+            textOnly = {
+                type  = "toggle", name = "Text Only (No Icon)",
+                desc  = "Hide the icon texture, border, and CDM warning overlay. Only the deck position and proc count text are shown. Frame remains draggable.",
+                order = o(), width = "half",
+                hidden = iconHidden,
+                get   = function() return db().textOnly == true end,
+                set   = function(_, v)
+                    db().textOnly = v
+                    refresh()
+                end,
+            },
+            textsUnlocked = {
+                type  = "toggle", name = "Unlock Texts (Drag to Position)",
+                desc  = "Enables click-and-drag on the deck, proc, and violation texts. A faint blue overlay marks the draggable area. Disable to lock and click-through.",
+                order = o(), width = "half",
+                hidden = iconHidden,
+                get   = function() return db().textsUnlocked == true end,
+                set   = function(_, v)
+                    db().textsUnlocked = v
+                    ApplyTextDragHandleState(entry, v)
+                end,
+            },
+            desaturateEmpty = {
+                type  = "toggle", name = "Desaturate when no procs left",
+                desc  = "Desaturates the icon texture when proc count is 0.",
+                order = o(), width = "half",
+                hidden = iconHidden,
+                get   = function() return db().desaturateEmpty == true end,
+                set   = function(_, v)
+                    db().desaturateEmpty = v
+                    refresh()
+                end,
+            },
 
-            -- ── CDM TRACKING ──────────────────────────────────────────────────
+            -- ── CDM TRACKING (rides in the Widget tab) ────────────────────────
             cdmHeader = {
                 type = "header", name = "CDM Tracking", order = o(),
                 hidden = function() return iconHidden() or entry.noCDMWarn end,
@@ -562,53 +611,23 @@ local function BuildDeckOptionsGroup(entry)
                         ns.RehookCDM()
                         C_Timer.After(0.1, function()
                             UpdateIcon(entry)
-                            AceConfigDialog:Open(PT_OPTIONS_NAME)
+                            -- refresh whichever panel is showing (Arc 2.0 or classic)
+                            local skin = LibStub and LibStub("ArcSkin-1.0", true)
+                            local sw = skin and skin:GetOptionsWindow(PT_OPTIONS_NAME)
+                            if sw and sw.frame:IsShown() then
+                                skin:Refresh(PT_OPTIONS_NAME)
+                            else
+                                AceConfigDialog:Open(PT_OPTIONS_NAME)
+                            end
                         end)
                     end
                 end,
             },
 
-            -- ── ICON ──────────────────────────────────────────────────────────
-            iconHeader = {
-                type = "header", name = "Icon", order = o(),
+            -- ── POSITION & SIZE ───────────────────────────────────────────────
+            posHeader = {
+                type = "header", name = "Position & Size", order = o(),
                 hidden = iconHidden,
-            },
-            lockPosition = {
-                type  = "toggle", name = "Lock Position",
-                desc  = "Prevent the icon from being dragged. When locked the frame is click-through.",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                get   = function() return db().lockPosition == true end,
-                set   = function(_, v)
-                    db().lockPosition = v
-                    local wf = entry.widget
-                    if wf then
-                        wf:SetMovable(not v)
-                        wf:EnableMouse(not v)
-                    end
-                end,
-            },
-            textOnly = {
-                type  = "toggle", name = "Text Only (No Icon)",
-                desc  = "Hide the icon texture, border, and CDM warning overlay. Only the deck position and proc count text are shown. Frame remains draggable.",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                get   = function() return db().textOnly == true end,
-                set   = function(_, v)
-                    db().textOnly = v
-                    refresh()
-                end,
-            },
-            textsUnlocked = {
-                type  = "toggle", name = "Unlock Texts (Drag to Position)",
-                desc  = "Enables click-and-drag on the deck, proc, and violation texts. A faint blue overlay marks the draggable area. Disable to lock and click-through.",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                get   = function() return db().textsUnlocked == true end,
-                set   = function(_, v)
-                    db().textsUnlocked = v
-                    ApplyTextDragHandleState(entry, v)
-                end,
             },
             posX = {
                 type  = "input", name = "Position X",
@@ -721,7 +740,7 @@ local function BuildDeckOptionsGroup(entry)
             frameStrata = {
                 type   = "select", name = "Frame Strata",
                 desc   = "The strata layer the icon sits on",
-                order  = o(), width = "normal",
+                order  = o(), width = "half",
                 hidden = iconHidden,
                 values = {
                     BACKGROUND        = "BACKGROUND",
@@ -779,18 +798,6 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            desaturateEmpty = {
-                type  = "toggle", name = "Desaturate when no procs left",
-                desc  = "Desaturates the icon texture when proc count is 0.",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                get   = function() return db().desaturateEmpty == true end,
-                set   = function(_, v)
-                    db().desaturateEmpty = v
-                    refresh()
-                end,
-            },
-
             -- ── DECK POSITION TEXT ────────────────────────────────────────────
             deckTextHeader = {
                 type = "header", name = "Deck Position Text", order = o(),
@@ -798,14 +805,14 @@ local function BuildDeckOptionsGroup(entry)
             },
             countDown = {
                 type  = "toggle", name = "Count Down  (600 to 0)",
-                order = o(), width = "full",
+                order = o(), width = "half",
                 hidden = iconHidden,
                 get   = function() return db().countDown end,
                 set   = function(_, v) db().countDown = v; refresh() end,
             },
             showDeckSuffix = {
                 type  = "toggle", name = "Show /" .. entry.deckSize .. " suffix",
-                order = o(), width = "full",
+                order = o(), width = "half",
                 hidden = iconHidden,
                 get   = function() return db().showDeckSuffix end,
                 set   = function(_, v) db().showDeckSuffix = v; refresh() end,
@@ -868,19 +875,19 @@ local function BuildDeckOptionsGroup(entry)
 
             -- ── PROC COUNT TEXT ───────────────────────────────────────────────
             procTextHeader = {
-                type = "header", name = "Proc Count Text", order = o(),
+                type = "header", name = "Proc Count", order = o(),
                 hidden = iconHidden,
             },
             procCountDown = {
                 type  = "toggle", name = "Count Down  (3 to 0)",
-                order = o(), width = "full",
+                order = o(), width = "half",
                 hidden = iconHidden,
                 get   = function() return db().procCountDown end,
                 set   = function(_, v) db().procCountDown = v; refresh() end,
             },
             showProcSuffix = {
                 type  = "toggle", name = "Show /" .. entry.procs .. " suffix",
-                order = o(), width = "full",
+                order = o(), width = "half",
                 hidden = iconHidden,
                 get   = function() return db().showProcSuffix end,
                 set   = function(_, v) db().showProcSuffix = v; refresh() end,
@@ -888,7 +895,7 @@ local function BuildDeckOptionsGroup(entry)
             procSize = {
                 type = "range", name = "Font Size",
                 min = 6, max = 32, step = 1,
-                order = o(), width = "half",
+                order = o(), width = "full",
                 hidden = iconHidden,
                 get  = function() return db().procSize end,
                 set  = function(_, v) db().procSize = v; refresh() end,
@@ -932,11 +939,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── PROC COLORS ───────────────────────────────────────────────────
-            procColorsHeader = {
-                type = "header", name = "Proc Count Colors", order = o(),
-                hidden = iconHidden,
-            },
+            -- proc count colors flow in the same "Proc Count" section
             emptyColor = {
                 type = "color", name = "All Procs Available",
                 desc  = "No procs used this deck",
@@ -968,73 +971,8 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── BORDER ────────────────────────────────────────────────────────
-            borderHeader = {
-                type = "header", name = "Border", order = o(),
-                hidden = iconHidden,
-            },
-            borderEnabled = {
-                type  = "toggle", name = "Enable Border",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                get   = function() return db().borderEnabled end,
-                set   = function(_, v) db().borderEnabled = v; refresh() end,
-            },
-            borderUseClass = {
-                type  = "toggle", name = "Use Class Color",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                get   = function() return db().borderUseClass end,
-                set   = function(_, v) db().borderUseClass = v; refresh() end,
-            },
-            borderThickness = {
-                type = "range", name = "Thickness",
-                min = 1, max = 10, step = 1,
-                order = o(), width = "half",
-                hidden = iconHidden,
-                get  = function() return db().borderThickness end,
-                set  = function(_, v) db().borderThickness = v; refresh() end,
-            },
-            borderInset = {
-                type = "range", name = "Inset",
-                min = -10, max = 10, step = 1,
-                order = o(), width = "half",
-                hidden = iconHidden,
-                get  = function() return db().borderInset end,
-                set  = function(_, v) db().borderInset = v; refresh() end,
-            },
-            borderColor = {
-                type = "color", name = "Border Color",
-                order = o(), width = "full", hasAlpha = true,
-                hidden = iconHidden,
-                get  = function() return db().borderR, db().borderG, db().borderB, db().borderA end,
-                set  = function(_, r, g, b, a)
-                    local d = db(); d.borderR=r; d.borderG=g; d.borderB=b; d.borderA=a; refresh()
-                end,
-            },
-
-            -- ── RESET ─────────────────────────────────────────────────────────
-            resetHeader = {
-                type = "header", name = "Reset", order = o(),
-                hidden = iconHidden,
-            },
-            resetDeck = {
-                type  = "execute", name = "Reset Deck Tracking",
-                desc  = "Reset deck position and proc count to zero",
-                order = o(), width = "full",
-                hidden = iconHidden,
-                func  = function()
-                    if entry.OnReset then entry.OnReset() end
-                    UpdateIcon(entry)
-                end,
-            },
-
-
-            -- ── VIOLATIONS ────────────────────────────────────────────────────
-            violHeader = {
-                type = "header", name = "Violations", order = o(),
-                hidden = iconHidden,
-            },
+            -- ── VIOLATIONS (lives in the Proc Count section: no own header;
+            -- the violation counter is a proc-count companion) ────────────────
             showViolations = {
                 type  = "toggle", name = "Show Violation Counter",
                 desc  = "Shows a count of decks that had wrong proc count. Disabled by default.",
@@ -1060,6 +998,17 @@ local function BuildDeckOptionsGroup(entry)
                     if w and w._violText then
                         w._violText:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", v, "OUTLINE")
                     end
+                end,
+            },
+            violColor = {
+                type = "color", name = "Color",
+                order = o(), width = "half", hasAlpha = false,
+                hidden = function() return iconHidden() or not db().showViolations end,
+                get  = function() return db().violR or 1, db().violG or 0.2, db().violB or 0.2 end,
+                set  = function(_, r, g, b)
+                    local d = db(); d.violR=r; d.violG=g; d.violB=b
+                    local w = entry.widget
+                    if w and w._violText then w._violText:SetTextColor(r, g, b) end
                 end,
             },
             violOffX = {
@@ -1128,15 +1077,48 @@ local function BuildDeckOptionsGroup(entry)
                     if w and w._violTextHandle and w._violTextHandle._resync then w._violTextHandle._resync() end
                 end,
             },
-            violColor = {
-                type = "color", name = "Color",
-                order = o(), width = "full", hasAlpha = false,
-                hidden = function() return iconHidden() or not db().showViolations end,
-                get  = function() return db().violR or 1, db().violG or 0.2, db().violB or 0.2 end,
-                set  = function(_, r, g, b)
-                    local d = db(); d.violR=r; d.violG=g; d.violB=b
-                    local w = entry.widget
-                    if w and w._violText then w._violText:SetTextColor(r, g, b) end
+            -- ── BORDER ────────────────────────────────────────────────────────
+            borderHeader = {
+                type = "header", name = "Border", order = o(),
+                hidden = iconHidden,
+            },
+            borderEnabled = {
+                type  = "toggle", name = "Enable Border",
+                order = o(), width = "full",
+                hidden = iconHidden,
+                get   = function() return db().borderEnabled end,
+                set   = function(_, v) db().borderEnabled = v; refresh() end,
+            },
+            borderUseClass = {
+                type  = "toggle", name = "Use Class Color",
+                order = o(), width = "full",
+                hidden = iconHidden,
+                get   = function() return db().borderUseClass end,
+                set   = function(_, v) db().borderUseClass = v; refresh() end,
+            },
+            borderThickness = {
+                type = "range", name = "Thickness",
+                min = 1, max = 10, step = 1,
+                order = o(), width = "half",
+                hidden = iconHidden,
+                get  = function() return db().borderThickness end,
+                set  = function(_, v) db().borderThickness = v; refresh() end,
+            },
+            borderInset = {
+                type = "range", name = "Inset",
+                min = -10, max = 10, step = 1,
+                order = o(), width = "half",
+                hidden = iconHidden,
+                get  = function() return db().borderInset end,
+                set  = function(_, v) db().borderInset = v; refresh() end,
+            },
+            borderColor = {
+                type = "color", name = "Border Color",
+                order = o(), width = "full", hasAlpha = true,
+                hidden = iconHidden,
+                get  = function() return db().borderR, db().borderG, db().borderB, db().borderA end,
+                set  = function(_, r, g, b, a)
+                    local d = db(); d.borderR=r; d.borderG=g; d.borderB=b; d.borderA=a; refresh()
                 end,
             },
         },
@@ -1157,6 +1139,32 @@ local function BuildMasterOptionsTable()
         args = {
             minimapHeader = {
                 type = "header", name = "Minimap Button", order = 1,
+            },
+            classicOptions = {
+                type  = "toggle",
+                name  = "Classic Options Panel",
+                desc  = "Use the old options window instead of the new Arc look. Applies immediately.",
+                order = 0.5,
+                width = "full",
+                get = function()
+                    local db = ArcUI_ProcTrackerDB or {}
+                    return db.classicOptions == true
+                end,
+                set = function(_, v)
+                    ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
+                    ArcUI_ProcTrackerDB.classicOptions = v and true or false
+                    -- swap the open panel to the chosen style immediately
+                    local skin = LibStub and LibStub("ArcSkin-1.0", true)
+                    local sw = skin and skin:GetOptionsWindow(PT_OPTIONS_NAME)
+                    local aceFrame = AceConfigDialog and AceConfigDialog.OpenFrames
+                        and AceConfigDialog.OpenFrames[PT_OPTIONS_NAME]
+                    local wasOpen = (sw and sw.frame:IsShown()) or (aceFrame ~= nil)
+                    if sw and sw.frame:IsShown() then sw.frame:Hide() end
+                    if aceFrame and AceConfigDialog then AceConfigDialog:Close(PT_OPTIONS_NAME) end
+                    if wasOpen then
+                        C_Timer.After(0.05, function() BuildOptionsPanel() end)
+                    end
+                end,
             },
             hideMinimap = {
                 type  = "toggle",
@@ -1200,15 +1208,36 @@ local function BuildMasterOptionsTable()
             }
         end
 
-        -- Deck tab wraps both sub-groups
+        -- Reset works on BOTH the icon and the bar -> its own tab at the
+        -- same level as Icon / Bar (Arc's call)
+        local resetGroup = {
+            type = "group", name = "Reset", order = 3,
+            args = {
+                resetDesc = {
+                    type = "description", order = 1, width = "full",
+                    name = "Resets this deck's tracking — deck position and proc count back to zero. Applies to both the Icon widget and the Bar.",
+                },
+                resetDeck = {
+                    type  = "execute", name = "Reset Deck Tracking",
+                    desc  = "Reset deck position and proc count to zero",
+                    order = 2, width = "full",
+                    func  = function()
+                        if entry.OnReset then entry.OnReset() end
+                        UpdateIcon(entry)
+                    end,
+                },
+            },
+        }
+
+        -- Deck tab wraps the sub-groups
         local deckTab = {
             type        = "group",
             name        = entry.name,
             order       = order,
             childGroups = "tab",
             args        = {
-                icon = iconGroup,
-                bar  = barGroup or {
+                icon  = iconGroup,
+                bar   = barGroup or {
                     type = "group", name = "Bar", order = 2,
                     args = {
                         noBar = {
@@ -1217,6 +1246,7 @@ local function BuildMasterOptionsTable()
                         }
                     }
                 },
+                reset = resetGroup,
             },
         }
         args[entry.id] = deckTab
@@ -1236,7 +1266,45 @@ local function RefreshMasterOptions()
     optionsRegistered = true
 end
 
+-- Arc 2.0 theme: render the SAME options table in the ArcSkin window.
+-- Live refresh: PT fires NotifyChange on drag/CDM updates -- forward it.
+local skinNotifyListener
+local function OpenSkinnedOptions(entry)
+    local skin = LibStub and LibStub("ArcSkin-1.0", true)
+    if not skin then return false end
+    if not skinNotifyListener and AceConfigRegistry and AceConfigRegistry.RegisterCallback then
+        skinNotifyListener = {}
+        AceConfigRegistry.RegisterCallback(skinNotifyListener, "ConfigTableChange", function(_, appName)
+            if appName == PT_OPTIONS_NAME then skin:Refresh(PT_OPTIONS_NAME) end
+        end)
+    end
+    local version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata("ArcUI_ProcTracker", "Version")) or ""
+    local db = ArcUI_ProcTrackerDB or {}
+    -- one-time size migration: pre-two-column saved widths are too narrow
+    -- for the paired-row layout; reset them once so the new look shows
+    if db.skinWinV ~= 2 then
+        db.skinWinV = 2
+        if db.skinWinW and db.skinWinW < 700 then db.skinWinW, db.skinWinH = nil, nil end
+    end
+    skin:ToggleOptions(PT_OPTIONS_NAME, BuildMasterOptionsTable(), {
+        title = "ProcTracker",
+        version = version,
+        width = db.skinWinW or 760, height = db.skinWinH or 640,
+        selectTab = entry and entry.id or nil,
+        onResize = function(w, h)
+            ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
+            ArcUI_ProcTrackerDB.skinWinW = math.floor(w + 0.5)
+            ArcUI_ProcTrackerDB.skinWinH = math.floor(h + 0.5)
+        end,
+    })
+    return true
+end
+
 BuildOptionsPanel = function(entry)
+    -- the Arc look is the DEFAULT (Arc's call); Classic is the opt-out
+    local db = ArcUI_ProcTrackerDB
+    if not (db and db.classicOptions) and OpenSkinnedOptions(entry) then return end
+
     if not AceConfig or not AceConfigDialog then
         print("|cffFF4444ProcTracker:|r AceConfig not available")
         return
@@ -1355,7 +1423,8 @@ watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
             if entry.OnEnable then entry.OnEnable() end
         end
         InitMinimapButton()
-        print("|cffFFAA00ProcTracker|r loaded — " .. #registry .. " deck(s) active  |cff888888/pt for options|r")
+        -- (login chat message removed -- Arc's call: minimal chat output;
+        -- the minimap button and /pt are the discoverability paths)
         return
     end
 
@@ -1489,11 +1558,17 @@ local function ResetAllDecks()
 end
 
 local cmResetArmed = false; local cmResetStartTS = nil; local cmResetInstID = nil
+local lastEnterWorldTS = -10
 local resetEventFrame = CreateFrame("Frame")
 resetEventFrame:RegisterEvent("ENCOUNTER_START")
 resetEventFrame:RegisterEvent("CHALLENGE_MODE_RESET")
 resetEventFrame:RegisterEvent("WORLD_STATE_TIMER_START")
+resetEventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 resetEventFrame:SetScript("OnEvent", function(_, event, a1)
+    if event == "PLAYER_ENTERING_WORLD" then
+        lastEnterWorldTS = GetTime()
+        return
+    end
     if event == "ENCOUNTER_START" then
         local diff = select(3, GetInstanceInfo())
         -- 14-17 = Normal/Heroic/Mythic/LFR raids; 233 = Mythic Flexible (added in 12.0.7)
@@ -1509,8 +1584,17 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
             local inInst, instType = IsInInstance()
             local diff   = select(3, GetInstanceInfo())
             local instID = select(8, GetInstanceInfo())
+            -- Deck-reset SKIP protection: the server only resets proc decks for
+            -- players INSIDE at the yellow-gate drop; zoning out across the drop
+            -- ("the skip") keeps the deck. When a skipper zones back in, the
+            -- client syncs the already-running key timer and fires a load-sync
+            -- WORLD_STATE_TIMER_START — which can land within the 9s arm window
+            -- if the skip was fast, wrongly resetting the addon deck. A genuine
+            -- gate-drop event fires while standing in the world; a load-sync one
+            -- fires right after PLAYER_ENTERING_WORLD. Reject the latter.
             if inInst and instType == "party" and diff == 8 and instID == cmResetInstID
-            and (GetTime() - (cmResetStartTS or 0)) <= 9 then ResetAllDecks() end
+            and (GetTime() - (cmResetStartTS or 0)) <= 9
+            and (GetTime() - lastEnterWorldTS) > 2.5 then ResetAllDecks() end
         end
         cmResetArmed = false; cmResetStartTS = nil; cmResetInstID = nil; return
     end

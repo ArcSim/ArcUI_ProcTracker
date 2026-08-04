@@ -183,10 +183,116 @@ local function InstallSetCDIDHook()
     end
 end
 
+-- ── ATTRIBUTION TIMELINE ──────────────────────────────────────────────────────
+-- The question this exists to answer: when a Tempest buff arrives, did it come
+-- from the MSW-spent deck or from the Awakening Storms RPPM off Stormstrike /
+-- Windstrike? Nothing on the aura says so -- both talents trigger the SAME
+-- buff spell (455129 is a proc-trigger-spell effect whose trigger IS 454015).
+-- So the only hope is the surrounding event stream:
+--   * the deck rolls inside the MSW spend, i.e. attached to the SPENDER cast
+--   * AWS rolls inside the Stormstrike/Windstrike execute, i.e. attached to the STRIKE cast
+-- Outside Ascendance/DW those are separated by a GCD and trivially separable.
+-- Inside them, Thorim's Invocation makes Windstrike auto-cast the spender, so
+-- both land together -- that is the case this timeline is built to crack. We
+-- record ARRIVAL ORDER (a monotonic counter bumped per cast) as well as age,
+-- because both can share a GetTime() while still arriving in a fixed order.
+local STRIKE_IDS = { [17364]=true, [115356]=true }                      -- Stormstrike / Windstrike
+local SPENDER_IDS = { [188196]=true, [188443]=true, [452201]=true, [1218090]=true } -- LB / CL / Tempest / Primordial Storm
+local ATTRIB_WINDOW = 0.6   -- seconds a cast stays a plausible cause
+
+local castSeq     = 0
+local lastStrike  = { id=nil, seq=-1, t=nil }
+local lastSpender = { id=nil, seq=-1, t=nil }
+local lastAttribT = nil
+local attrib      = { strikeOnly=0, spenderOnly=0, bothStrikeLast=0, bothSpenderLast=0, neither=0 }
+
+-- Full SPELL_UPDATE_COOLDOWN payload trail. If AWS routes its grant through a
+-- hidden trigger spell, it shows up here and nowhere else -- this is the same
+-- instrument that caught the silent Fire Nova proc.
+local sucRing, SUC_MAX = {}, 40
+
+local function NoteCast(sid)
+    if STRIKE_IDS[sid] then
+        castSeq = castSeq + 1
+        lastStrike.id, lastStrike.seq, lastStrike.t = sid, castSeq, GetTime()
+    elseif SPENDER_IDS[sid] then
+        castSeq = castSeq + 1
+        lastSpender.id, lastSpender.seq, lastSpender.t = sid, castSeq, GetTime()
+    end
+end
+
+local function NoteSUC(spellID, baseSpellID, category, startRecovery, itemID)
+    sucRing[#sucRing+1] = { t=GetTime(), s=spellID, b=baseSpellID,
+                            c=category, r=startRecovery, i=itemID }
+    if #sucRing > SUC_MAX then table.remove(sucRing, 1) end
+end
+
+local function DumpSUCTrail(window)
+    local now, shown = GetTime(), 0
+    for i = #sucRing, 1, -1 do
+        if now - sucRing[i].t > window then break end
+        shown = shown + 1
+    end
+    if shown == 0 then
+        Push("  spell-update trail", "none in the last "..string.format("%.1fs", window), "info")
+        return
+    end
+    for i = #sucRing - shown + 1, #sucRing do
+        local e = sucRing[i]
+        Push(string.format("  SUC -%.3fs", now - e.t),
+            "spellID="..SafeVal(e.s).."  base="..SafeVal(e.b)
+            .."  cat="..SafeVal(e.c).."  startRec="..SafeVal(e.r)
+            .."  item="..SafeVal(e.i), "info")
+    end
+end
+
+local function AttributeGain(trigger)
+    if not enabled then return end
+    local now = GetTime()
+    -- One gain can surface as several signals in the same frame (SPELL_UPDATE_CD
+    -- plus an aura add/update). Attribute once, then just note the extra signal.
+    if lastAttribT == now then
+        Push("  also signalled by", trigger, "info")
+        return
+    end
+    lastAttribT = now
+
+    local sAge = lastStrike.t  and (now - lastStrike.t)
+    local pAge = lastSpender.t and (now - lastSpender.t)
+    local sIn  = sAge ~= nil and sAge <= ATTRIB_WINDOW
+    local pIn  = pAge ~= nil and pAge <= ATTRIB_WINDOW
+
+    local verdict, bucket, col
+    if sIn and not pIn then
+        verdict, bucket, col = "AWS  (strike in window, no spend)", "strikeOnly", "FF8844"
+    elseif pIn and not sIn then
+        verdict, bucket, col = "DECK (spend in window, no strike)", "spenderOnly", "00FF88"
+    elseif sIn and pIn then
+        -- The hard case. Arrival order is the only thing left that differs.
+        if lastStrike.seq > lastSpender.seq then
+            verdict, bucket, col = "AMBIGUOUS -> STRIKE arrived last", "bothStrikeLast", "FFFF44"
+        else
+            verdict, bucket, col = "AMBIGUOUS -> SPENDER arrived last", "bothSpenderLast", "FFFF44"
+        end
+    else
+        verdict, bucket, col = "NEITHER (no cast in window)", "neither", "FF4444"
+    end
+    attrib[bucket] = attrib[bucket] + 1
+
+    Push("TEMPEST GAIN ["..trigger.."]", string.format(
+        "%s  |  strike=%s age=%s seq=%d   spender=%s age=%s seq=%d",
+        verdict,
+        lastStrike.id  and tostring(lastStrike.id)  or "none",
+        sAge and string.format("%.3fs", sAge) or "-", lastStrike.seq,
+        lastSpender.id and tostring(lastSpender.id) or "none",
+        pAge and string.format("%.3fs", pAge) or "-", lastSpender.seq), col)
+    DumpSUCTrail(0.6)
+end
+
 -- ── Event listener ────────────────────────────────────────────────────────────
 local dbgFrame = CreateFrame("Frame")
 
-dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
+dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3, a4, a5)
     if not enabled then return end
 
     -- UNIT_SPELLCAST_SUCCEEDED
@@ -195,19 +301,22 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
         if not a3 or (issecretvalue and issecretvalue(a3)) then return end
         local sid = tonumber(a3)
         if not sid then return end
+        NoteCast(sid)
         if sid == TEMPEST_CAST then
-            Push("SPELLCAST  Tempest", "spellID="..sid, "tempest_cast")
-        elseif sid == LB_ID then
-            Push("SPELLCAST  LightningBolt", "spellID="..sid, "info")
+            Push("SPELLCAST  Tempest", "spellID="..sid.."  seq="..castSeq, "tempest_cast")
+        elseif SPENDER_IDS[sid] then
+            Push("SPELLCAST  spender", "spellID="..sid.."  seq="..castSeq.." (MSW spend -> deck rolls)", "info")
         end
         return
     end
 
     -- SPELL_UPDATE_COOLDOWN
     if event == "SPELL_UPDATE_COOLDOWN" then
+        NoteSUC(a1, a2, a3, a4, a5)
         if issecretvalue and issecretvalue(a1) then return end
         local sid = tonumber(a1)
         if sid == TEMPEST_BUFF then
+            AttributeGain("SPELL_UPDATE_CD")
             -- TempestDeck logs COUNTED/IGNORED when inside a consume window
             -- This fires for events outside any consume window
             -- Read instID from CDM frame state (already tracked by hooks)
@@ -240,6 +349,8 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "UNIT_AURA" then
         if a1 ~= "player" then return end
         local info = a2; if not info then return end
+        -- 12.1: payload vectors are SECRET in restricted content (ipairs throws)
+        if issecretvalue and issecretvalue(info.isFullUpdate) then return end
 
         if info.addedAuras then
             for _, aura in ipairs(info.addedAuras) do
@@ -249,6 +360,7 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
                     Push("UNIT_AURA  MSW GAINED", "instID="..SafeVal(aura.auraInstanceID).." apps="..tostring(apps), "msw_gain")
                 elseif sid == TEMPEST_BUFF then
                     Push("UNIT_AURA  Tempest GAINED", "instID="..SafeVal(aura.auraInstanceID), "tempest_gain")
+                    AttributeGain("AURA_ADDED")
                 elseif sid == AD_BUFF_ID then
                     Push("UNIT_AURA  ArcDischarge GAINED", "instID="..SafeVal(aura.auraInstanceID), "ad_gain")
                 end
@@ -261,7 +373,10 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
                 local tlive = C_UnitAuras.GetPlayerAuraBySpellID(TEMPEST_BUFF)
                 if tlive and tlive.auraInstanceID == instID then
                     local apps = not (issecretvalue and issecretvalue(tlive.applications)) and tonumber(tlive.applications) or "?"
+                    -- A 2-stack buff means a second grant shows up HERE as an
+                    -- update, not as a new aura instance.
                     Push("UNIT_AURA  Tempest UPDATED", "instID="..SafeVal(instID).." apps="..tostring(apps), "tempest_gain")
+                    AttributeGain("AURA_UPDATED")
                 end
                 local adlive = C_UnitAuras.GetPlayerAuraBySpellID(AD_BUFF_ID)
                 if adlive and adlive.auraInstanceID == instID then
@@ -276,11 +391,8 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     end
 end)
 
--- Register events
-dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-dbgFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-dbgFrame:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
-dbgFrame:RegisterUnitEvent("UNIT_AURA", "player")
+-- Events are registered on Enable() only -- zero idle cost for users who
+-- never open the debugger
 
 -- Wire into TempestDeck decision log
 local function WireDeckDebug()
@@ -405,6 +517,21 @@ local function BuildUI()
     end)
     Btn("Export", 386, DoExport)
 
+    Btn("Attrib", 574, function()
+        Sep("ATTRIBUTION TALLY")
+        local clean = attrib.strikeOnly + attrib.spenderOnly
+        local amb   = attrib.bothStrikeLast + attrib.bothSpenderLast
+        Push("AWS  (strike only)",    tostring(attrib.strikeOnly),  "FF8844")
+        Push("DECK (spend only)",     tostring(attrib.spenderOnly), "00FF88")
+        Push("ambiguous, strike last", tostring(attrib.bothStrikeLast),  "FFFF44")
+        Push("ambiguous, spend last",  tostring(attrib.bothSpenderLast), "FFFF44")
+        Push("neither in window",      tostring(attrib.neither),     "FF4444")
+        Push("SPLIT", string.format("clean=%d  ambiguous=%d  (%.0f%% resolvable by window alone)",
+            clean, amb, (clean + amb) > 0 and (clean / (clean + amb) * 100) or 0), "info")
+        Push("READ THIS AS", "if the two CLEAN buckets show a consistent difference in their "
+            .."spell-update trails, that difference is the discriminator for the ambiguous ones", "info")
+    end)
+
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", -2, -2)
     closeBtn:SetScript("OnClick", function() f:Hide() end)
@@ -446,8 +573,7 @@ local SS_IDS = { [17364]=true, [115356]=true }
 local RTL_ID = 211094  -- Ride the Lightning / Awakening Storms
 
 local ssRtlFrame = CreateFrame("Frame")
-ssRtlFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-ssRtlFrame:RegisterEvent("UNIT_AURA")
+-- (registered on Enable() only)
 ssRtlFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if not enabled then return end
 
@@ -468,6 +594,8 @@ ssRtlFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "UNIT_AURA" then
         if a1 ~= "player" then return end
         local info = a2; if not info then return end
+        -- 12.1: payload vectors are SECRET in restricted content (ipairs throws)
+        if issecretvalue and issecretvalue(info.isFullUpdate) then return end
         if info.addedAuras then
             for _, aura in ipairs(info.addedAuras) do
                 local sid = not (issecretvalue and issecretvalue(aura.spellId)) and tonumber(aura.spellId) or nil
@@ -487,6 +615,12 @@ end)
 local function Enable()
     enabled      = true
     sessionStart = GetTime()
+    dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    dbgFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+    dbgFrame:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
+    dbgFrame:RegisterUnitEvent("UNIT_AURA", "player")
+    ssRtlFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    ssRtlFrame:RegisterEvent("UNIT_AURA")
     BuildUI()
     InstallSetCDIDHook()
     ScanAndHookFrames()

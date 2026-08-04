@@ -1,6 +1,9 @@
 -- ArcUI_PT_DWDeck.lua
 -- Doom Winds deck tracking.
--- Detection: CDM frame hook on cooldownID=82621 (auraInstanceID change = proc).
+-- Detection: CDM frame hooks on cooldownID=82621. A proc is CDM calling
+--   OnAuraInstanceInfoSet (its own change detection), or OnUnitAuraUpdatedEvent
+--   while the buff is already up (a refresh = back-to-back proc). The aura
+--   instance ID itself is secret on 12.1 and is never compared for detection.
 -- Stack progression: PT.MSW.OnConsumed callback — no duplicate UNIT_AURA listener.
 -- Asc suppression: deck frozen during Ascendance (stacks not counted).
 -- Snapshot fix: dwSnapTotal set to pre-advance value on every consume.
@@ -26,6 +29,7 @@ local dwViolations     = 0
 local dwGainCount      = 0
 local dwSnapTotal      = 0   -- pre-advance snapshot for THIS consume's proc check
 local dwLastAuraInstID = nil
+local dwAuraActive     = false  -- DW buff up? driven by CDM's own Set/Cleared calls
 local dwCDMFrame       = nil
 local dwProcThisConsume= false
 local dwLastProcTime   = 0
@@ -44,6 +48,25 @@ local function BufCheck(buf, window)
         if (now - buf[i]) > window then table.remove(buf, i) end
     end
     return false
+end
+
+-- Secret-safe aura-instance comparison (12.1: frame.auraInstanceID is SECRET in
+-- instances; == between two secrets makes a secret boolean and boolean-testing
+-- it THROWS). Returns true (known same) / false (known different) / nil
+-- (unknowable -- at least one side secret). When unknowable, callers fall back
+-- to the time/consume guards that already dedup proc counting.
+local function SameAuraID(a, b)
+    if a == nil or b == nil then return false end
+    if issecretvalue and (issecretvalue(a) or issecretvalue(b)) then return nil end
+    return a == b
+end
+
+-- Store an aid for future compares ONLY when non-secret (a stored secret would
+-- poison every later compare into "unknowable").
+local function StorableAID(v)
+    if v == nil then return nil end
+    if issecretvalue and issecretvalue(v) then return nil end
+    return v
 end
 
 -- ── Deck advancement ──────────────────────────────────────────────────────────
@@ -67,13 +90,20 @@ end
 -- ── Proc confirmed ────────────────────────────────────────────────────────────
 local dwEnabled = false  -- set true only when talented and registered
 
+-- Debug attempt reporting. PT.DW.OnAttempt is nil unless DWDebug is open, so
+-- this costs one table lookup per hook fire in normal play.
+local function Attempt(source, accepted, reason)
+    local fn = PT.DW and PT.DW.OnAttempt
+    if fn then fn(source, accepted, reason) end
+end
+
 local function OnDWGain(source)
     if not dwEnabled then return end  -- zero CPU when untalented
     local now = GetTime()
     -- Same-frame dedup
-    if now == dwLastProcTime then return end
+    if now == dwLastProcTime then Attempt(source, false, "same-frame dedup"); return end
     -- Already counted a proc for this MSW consume
-    if dwProcThisConsume then return end
+    if dwProcThisConsume then Attempt(source, false, "already counted this MSW consume"); return end
 
     dwProcThisConsume = true
     dwGainCount       = dwGainCount + 1
@@ -97,6 +127,7 @@ local function OnDWGain(source)
         dwDeckProcs = dwDeckProcs + 1
     end
 
+    Attempt(source, true, nil)
     if PT.DW.OnProc then
         PT.DW.OnProc(dwDeckNumber, dwDeckProcs, dwGainCount, deckPos)
     end
@@ -104,62 +135,114 @@ local function OnDWGain(source)
 end
 
 -- ── CDM frame hooks ───────────────────────────────────────────────────────────
+-- Shared gate for the CDM hook paths. Order preserved exactly: BufCheck runs on
+-- every fire (it also prunes the buffer), then the Ascendance check.
+local function GateGain(source)
+    if BufCheck(hardCastBuf, 0.5) then
+        Attempt(source, false, "hard-cast window")
+        return
+    end
+    if PT.MSW.IsAscActive() then
+        Attempt(source, false, "Ascendance active")
+        return
+    end
+    OnDWGain(source)
+end
+
 local function HookDWFrame(frame)
     if frame._arcPTDWHooked then return end
     frame._arcPTDWHooked = true
 
+    -- 12.1 NOTE: auraInstanceID is SECRET even in the open world, so the old
+    -- "did the id change?" test is dead -- SameAuraID can only ever answer
+    -- "unknowable". Detection is therefore driven by WHICH CDM callback fires,
+    -- plus a plain nil-check on the id (nil-checks are never secret):
+    --
+    --   OnAuraInstanceInfoSet     Blizzard calls this ONLY when its own compare
+    --                             inside SetAuraInstanceInfo saw a different
+    --                             aura instance/spell. The CALL IS the signal.
+    --   OnAuraInstanceInfoCleared the aura went away.
+    --   OnUnitAuraAddedEvent      CooldownViewer.lua fires this on EVERY active
+    --                             item frame for ANY added-aura batch, so it
+    --                             says nothing about DW. NOT a proc source.
+    --   OnUnitAuraUpdatedEvent    dispatched only for frames mapped to this
+    --                             aura instance, so while the buff is up it
+    --                             means the aura itself changed = a refresh.
+
     hooksecurefunc(frame, "OnAuraInstanceInfoSet", function(self)
         if self ~= dwCDMFrame then return end
         local instID = self.auraInstanceID
-        if not instID or instID == dwLastAuraInstID then return end
-        dwLastAuraInstID = instID
-        local isHardCast = BufCheck(hardCastBuf, 0.5)
-        if not isHardCast and not PT.MSW.IsAscActive() then
-            OnDWGain("CDM_INSTID")
-        end
+        if not instID then return end
+        dwAuraActive     = true
+        dwLastAuraInstID = StorableAID(instID)
+        GateGain("CDM_SET")
     end)
 
     hooksecurefunc(frame, "OnAuraInstanceInfoCleared", function(self)
         if self ~= dwCDMFrame then return end
-        -- cleared — nothing to do for proc detection
+        dwAuraActive     = false
+        dwLastAuraInstID = nil
     end)
 
     hooksecurefunc(frame, "OnUnitAuraAddedEvent", function(self)
         if self ~= dwCDMFrame then return end
         local instID = self.auraInstanceID
-        if not instID or instID == dwLastAuraInstID then return end
-        dwLastAuraInstID = instID
-        local isHardCast = BufCheck(hardCastBuf, 0.5)
-        if not isHardCast and not PT.MSW.IsAscActive() then
-            OnDWGain("CDM_ADDED")
+        if not instID then return end
+        -- Not a DW signal (see above). The ONLY thing it is good for is
+        -- resyncing when the buff was already up before our hooks existed
+        -- (login mid-window) so no Set was ever seen. That resync must NOT
+        -- count: the gain happened before we were watching, and it may already
+        -- have been counted through the frame we were bound to before.
+        if dwAuraActive then
+            Attempt("CDM_ADDED", false, "unrelated aura batch, DW already tracked")
+            return
         end
+        dwAuraActive     = true
+        dwLastAuraInstID = StorableAID(instID)
+        Attempt("CDM_ADDED", false, "state resync only (buff was already up)")
     end)
 
     hooksecurefunc(frame, "OnUnitAuraUpdatedEvent", function(self)
         if self ~= dwCDMFrame then return end
         local instID = self.auraInstanceID
         if not instID then return end
-        if instID == dwLastAuraInstID then
-            -- Same instID = back-to-back proc (duration refresh)
-            local isHardCast = BufCheck(hardCastBuf, 0.5)
-            if not isHardCast and not PT.MSW.IsAscActive() then
-                OnDWGain("CDM_UPDATED")
-            end
+        if not dwAuraActive then
+            -- Same resync case as above: state only, never counted.
+            dwAuraActive     = true
+            dwLastAuraInstID = StorableAID(instID)
+            Attempt("CDM_UPDATED", false, "state resync only (buff was already up)")
             return
         end
-        dwLastAuraInstID = instID
-        local isHardCast = BufCheck(hardCastBuf, 0.5)
-        if not isHardCast and not PT.MSW.IsAscActive() then
-            OnDWGain("CDM_INSTID_UPD")
-        end
+        -- Buff already up and its own aura instance updated = duration refresh
+        -- = back-to-back proc.
+        local same = SameAuraID(instID, dwLastAuraInstID)
+        if same == false then dwLastAuraInstID = StorableAID(instID) end
+        GateGain(same == nil and "CDM_UPD_SECRET" or "CDM_UPDATED")
     end)
 end
 
+-- All four CDM viewers. The player decides where DW lives in their layout: the
+-- buff-BAR viewer is a common choice instead of the buff-icon one, and a
+-- cooldown can be moved between categories entirely. Every viewer's item frames
+-- share the same aura callbacks (CooldownViewerBuffBarItemMixin is built from
+-- CooldownViewerBuffItemMixin, and the aura lifecycle lives further up in
+-- CooldownViewerItemDataMixin), so detection works identically in all of them —
+-- only the visual layer differs. Scanning one viewer was the only thing tying
+-- us to the icon.
+local CDM_VIEWERS = {
+    "BuffIconCooldownViewer",
+    "BuffBarCooldownViewer",
+    "EssentialCooldownViewer",
+    "UtilityCooldownViewer",
+}
+
 local function FindDWCDMFrame()
-    local viewer = _G["BuffIconCooldownViewer"]
-    if viewer and viewer.itemFramePool then
-        for frame in viewer.itemFramePool:EnumerateActive() do
-            if frame.cooldownID == DW_CDM_ID then return frame end
+    for _, viewerName in ipairs(CDM_VIEWERS) do
+        local viewer = _G[viewerName]
+        if viewer and viewer.itemFramePool then
+            for frame in viewer.itemFramePool:EnumerateActive() do
+                if frame.cooldownID == DW_CDM_ID then return frame end
+            end
         end
     end
     return nil
@@ -189,6 +272,9 @@ local function RehookDWCDMFrame(force)
             dwCDMFrame = frame
             -- New frame from pool — clear hook flag so hooks reinstall
             frame._arcPTDWHooked = nil
+            -- Resync active state from the new frame WITHOUT counting a proc:
+            -- a rebind is not a gain. Plain nil-check, never secret.
+            dwAuraActive = frame.auraInstanceID ~= nil
         end
         HookDWFrame(frame)
     end
@@ -213,6 +299,7 @@ end
 PT.DW = {}
 PT.DW.OnProc        = nil   -- function(deckNum, deckProcs, totalGain, deckPos)
 PT.DW.OnDeckRollover= nil   -- function(newDeckNum, prevProcs, violation)
+PT.DW.OnAttempt     = nil   -- function(source, accepted, reason) — DWDebug only
 PT.DW.IsCDMTracking = function()
     -- Live check: frame must exist AND still claim our cooldownID
     if not dwCDMFrame then return false end
@@ -243,6 +330,7 @@ local function Reset()
     dwGainCount       = 0
     dwSnapTotal       = 0
     dwLastAuraInstID  = nil
+    dwAuraActive      = dwCDMFrame ~= nil and dwCDMFrame.auraInstanceID ~= nil
     dwProcThisConsume = false
     dwLastProcTime    = 0
     hardCastBuf       = {}

@@ -44,6 +44,9 @@ local BAR_DEFAULTS = {
     barLevel       = 5,
     barLockPos     = false,
     barTexture     = "Blizzard",
+    -- single fill color (overrides the state colors when enabled)
+    barFillSingle  = false,
+    barFillSingleR=0.0, barFillSingleG=0.8, barFillSingleB=1.0, barFillSingleA=1.0,
     -- Fill colors
     barEmptyR=0.0, barEmptyG=1.0,  barEmptyB=0.0, barEmptyA=1.0,
     barHalfR =1.0, barHalfG =0.82, barHalfB =0.0, barHalfA =1.0,
@@ -207,6 +210,10 @@ end
 
 -- ── Bar fill color (separate empty override for the bar texture itself) ───────
 local function BarFillColor(db, procs, maxProcs)
+    -- single-color mode: one fixed fill regardless of proc state
+    if db.barFillSingle then
+        return db.barFillSingleR or 1, db.barFillSingleG or 1, db.barFillSingleB or 1, db.barFillSingleA or 1
+    end
     if procs == 0 and db.barTexUseEmptyColor then
         return db.barTexEmptyR, db.barTexEmptyG, db.barTexEmptyB, db.barTexEmptyA
     end
@@ -415,6 +422,7 @@ local function UpdateBar(entry)
         dtf.text:SetTextColor(dtr,dtg,dtb,dta)
         ApplyTextAnchor(dtf, bw, db.barDeckTextAnchor,
             db.barDeckTextOffX, db.barDeckTextOffY, db.barDeckTextX, db.barDeckTextY)
+        dtf:EnableMouse(db.barDeckTextAnchor == "FREE" and not db.barLockPos)
         dtf:Show()
     else
         dtf:Hide()
@@ -481,6 +489,7 @@ local function UpdateBar(entry)
         ptf.text:SetTextColor(ptr,ptg,ptb,pta)
         ApplyTextAnchor(ptf, bw, db.barProcTextAnchor,
             db.barProcTextOffX, db.barProcTextOffY, db.barProcTextX, db.barProcTextY)
+        ptf:EnableMouse(db.barProcTextAnchor == "FREE" and not db.barLockPos)
         ptf:Show()
     else
         ptf:Hide()
@@ -492,7 +501,11 @@ local function MakeDraggableTextFrame(frameName, id, xKey, yKey, anchorKey)
     local tf = CreateFrame("Frame", frameName, UIParent)
     tf:SetSize(80, 24)
     tf:SetMovable(true)
-    tf:EnableMouse(true)
+    -- mouse OFF by default: these 80x24 frames sit ON the bar and were
+    -- eating drags over most of it (the "can only drag certain areas" bug).
+    -- UpdateBar enables the mouse only while the text is actually draggable
+    -- (FREE anchor + not locked).
+    tf:EnableMouse(false)
     tf:RegisterForDrag("LeftButton")
     tf:SetClampedToScreen(true)
     -- Strata and level set dynamically in BuildBarWidget
@@ -526,15 +539,30 @@ local function BuildBarWidget(entry)
     f:SetFrameLevel(db.barLevel or 5)
     f:SetPoint("CENTER", UIParent, "CENTER", db.barX, db.barY)
     f:SetClampedToScreen(true)
-    f:SetMovable(true); f:EnableMouse(true); f:RegisterForDrag("LeftButton")
+    -- respect a saved lock at login (locked = click-through, like the icon)
+    f:SetMovable(not db.barLockPos); f:EnableMouse(not db.barLockPos)
+    f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function(self)
         if BarDB(id).barLockPos then return end
         self:StartMoving()
     end)
     f:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
-        local _,_,_,x,y = self:GetPoint()
-        local bdb=BarDB(id); bdb.barX=x; bdb.barY=y
+        -- normalize to CENTER offsets (StartMoving re-anchors to a screen
+        -- corner; saving GetPoint raw made barX/barY corner-space numbers
+        -- that jump when re-applied as CENTER offsets on login). Convert
+        -- UIParent's center into this frame's scale space first.
+        local bdb = BarDB(id)
+        local cx, cy = self:GetCenter()
+        local ux, uy = UIParent:GetCenter()
+        local fs = self:GetEffectiveScale()
+        local us = UIParent:GetEffectiveScale()
+        if cx and ux and fs and fs > 0 then
+            bdb.barX = math.floor(cx - (ux * us / fs) + 0.5)
+            bdb.barY = math.floor(cy - (uy * us / fs) + 0.5)
+        end
+        self:ClearAllPoints()
+        self:SetPoint("CENTER", UIParent, "CENTER", bdb.barX or 0, bdb.barY or 0)
     end)
 
     -- Background
@@ -767,7 +795,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Layout
         layoutHeader = {
-            type="toggle", name="Layout", dialogControl="CollapsibleHeader",
+            type="toggle", name="Layout", dialogControl="CollapsibleHeader", arcGroup="Layout & Size",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.layout end,
@@ -814,6 +842,51 @@ local function BuildBarOptionsGroup(entry)
                 db().barLockPos=v
                 local bw=entry.barWidget
                 if bw then bw:SetMovable(not v); bw:EnableMouse(not v) end
+                refresh()   -- also re-evaluates the text frames' mouse state
+            end,
+        },
+        barPosX = {
+            type="input", name="Position X",
+            desc="Horizontal offset from screen center. Negative = left, positive = right.",
+            order=o(), width="half", hidden=function() return secHidden("layout") end,
+            get=function() return tostring(db().barX or 0) end,
+            set=function(_,v)
+                local n = tonumber(v); if not n then return end
+                db().barX = n
+                local bw = entry.barWidget
+                if bw then
+                    bw:ClearAllPoints()
+                    bw:SetPoint("CENTER", UIParent, "CENTER", db().barX or 0, db().barY or 0)
+                end
+            end,
+        },
+        barPosY = {
+            type="input", name="Position Y",
+            desc="Vertical offset from screen center. Negative = down, positive = up.",
+            order=o(), width="half", hidden=function() return secHidden("layout") end,
+            get=function() return tostring(db().barY or 0) end,
+            set=function(_,v)
+                local n = tonumber(v); if not n then return end
+                db().barY = n
+                local bw = entry.barWidget
+                if bw then
+                    bw:ClearAllPoints()
+                    bw:SetPoint("CENTER", UIParent, "CENTER", db().barX or 0, db().barY or 0)
+                end
+            end,
+        },
+        barRecenter = {
+            type="execute", name="Reset to Center",
+            desc="Reset the bar position to screen center (0, 0).",
+            order=o(), width="full", hidden=function() return secHidden("layout") end,
+            func=function()
+                local bdb = db()
+                bdb.barX, bdb.barY = 0, 0
+                local bw = entry.barWidget
+                if bw then
+                    bw:ClearAllPoints()
+                    bw:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+                end
             end,
         },
         barStrata = {
@@ -858,7 +931,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Size
         sizeHeader = {
-            type="toggle", name="Size", dialogControl="CollapsibleHeader",
+            type="toggle", name="Size", dialogControl="CollapsibleHeader", arcGroup="Layout & Size",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.size end,
@@ -906,7 +979,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Texture
         textureHeader = {
-            type="toggle", name="Bar Texture", dialogControl="CollapsibleHeader",
+            type="toggle", name="Bar Texture", dialogControl="CollapsibleHeader", arcGroup="Appearance",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.texture end,
@@ -936,7 +1009,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Fill Colors
         fillColorHeader = {
-            type="toggle", name="Fill Colors", dialogControl="CollapsibleHeader",
+            type="toggle", name="Fill Colors", dialogControl="CollapsibleHeader", arcGroup="Appearance",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.fillColors end,
@@ -945,10 +1018,27 @@ local function BuildBarOptionsGroup(entry)
                 if r then r:NotifyChange("ArcUI_ProcTracker_Options") end
             end,
         },
+        barFillSingle = {
+            type="toggle", name="Single Fill Color",
+            desc="Use one fixed color for the bar fill instead of the per-state colors — the same idea as the texts' Fixed Color.",
+            order=o(), width="full", hidden=function() return secHidden("fillColors") end,
+            get=function() return db().barFillSingle==true end,
+            set=function(_,v) db().barFillSingle=v; refresh() end,
+        },
+        barFillSingleColor = {
+            type="color", name="Fill Color", hasAlpha=true,
+            desc="The bar's fill color in Single Fill Color mode.",
+            order=o(), width="full",
+            hidden=function() return secHidden("fillColors") or not db().barFillSingle end,
+            get=function() return db().barFillSingleR,db().barFillSingleG,db().barFillSingleB,db().barFillSingleA end,
+            set=function(_,r,g,b,a)
+                db().barFillSingleR=r;db().barFillSingleG=g;db().barFillSingleB=b;db().barFillSingleA=a; refresh()
+            end,
+        },
         barEmptyColor = {
             type="color", name="All Procs Available", hasAlpha=false,
             desc="Bar color when no procs have fired yet this deck.",
-            order=o(), width=1.1, hidden=function() return secHidden("fillColors") end,
+            order=o(), width=1.1, hidden=function() return secHidden("fillColors") or db().barFillSingle end,
             get=function() return db().barEmptyR,db().barEmptyG,db().barEmptyB end,
             set=function(_,r,g,b) db().barEmptyR=r;db().barEmptyG=g;db().barEmptyB=b; refresh() end,
         },
@@ -956,14 +1046,14 @@ local function BuildBarOptionsGroup(entry)
         barHalfColor = {
             type="color", name="Partial Procs Used", hasAlpha=false,
             desc="Bar color when some but not all procs have fired.",
-            order=o(), width=1.1, hidden=function() return secHidden("fillColors") end,
+            order=o(), width=1.1, hidden=function() return secHidden("fillColors") or db().barFillSingle end,
             get=function() return db().barHalfR,db().barHalfG,db().barHalfB end,
             set=function(_,r,g,b) db().barHalfR=r;db().barHalfG=g;db().barHalfB=b; refresh() end,
         },
         barFullColor = {
             type="color", name="All Procs Done", hasAlpha=false,
             desc="Bar color when all expected procs have fired.",
-            order=o(), width=1.1, hidden=function() return secHidden("fillColors") end,
+            order=o(), width=1.1, hidden=function() return secHidden("fillColors") or db().barFillSingle end,
             get=function() return db().barFullR,db().barFullG,db().barFullB end,
             set=function(_,r,g,b) db().barFullR=r;db().barFullG=g;db().barFullB=b; refresh() end,
         },
@@ -981,7 +1071,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Bar texture empty state color
         barTexEmptyHeader = {
-            type="toggle", name="Bar Empty State Color", dialogControl="CollapsibleHeader",
+            type="toggle", name="Bar Empty State Color", dialogControl="CollapsibleHeader", arcGroup="Appearance",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.emptyState end,
@@ -993,7 +1083,7 @@ local function BuildBarOptionsGroup(entry)
         barTexUseEmptyColor = {
             type="toggle", name="Custom Empty Bar Color",
             desc="When no procs have fired, use a separate color for the bar texture (independent of the text color).",
-            order=o(), width="full", hidden=function() return secHidden("emptyState") end,
+            order=o(), width="full", hidden=function() return secHidden("emptyState") or db().barFillSingle end,
             get=function() return db().barTexUseEmptyColor==true end,
             set=function(_,v) db().barTexUseEmptyColor=v; refresh() end,
         },
@@ -1001,14 +1091,14 @@ local function BuildBarOptionsGroup(entry)
             type="color", name="Bar Empty Color", hasAlpha=true,
             desc="Bar texture color when no procs have fired. Only used when Custom Empty Bar Color is enabled.",
             order=o(), width="full",
-            hidden=function() return secHidden("emptyState") or not db().barTexUseEmptyColor end,
+            hidden=function() return secHidden("emptyState") or db().barFillSingle or not db().barTexUseEmptyColor end,
             get=function() return db().barTexEmptyR,db().barTexEmptyG,db().barTexEmptyB,db().barTexEmptyA end,
             set=function(_,r,g,b,a) db().barTexEmptyR=r;db().barTexEmptyG=g;db().barTexEmptyB=b;db().barTexEmptyA=a; refresh() end,
         },
 
         -- Border
         borderHeader = {
-            type="toggle", name="Border", dialogControl="CollapsibleHeader",
+            type="toggle", name="Border", dialogControl="CollapsibleHeader", arcGroup="Appearance",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.border end,
@@ -1040,7 +1130,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Tick Marks
         tickHeader = {
-            type="toggle", name="Proc Tick Marks", dialogControl="CollapsibleHeader",
+            type="toggle", name="Proc Tick Marks", dialogControl="CollapsibleHeader", arcGroup="Appearance",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.ticks end,
@@ -1161,7 +1251,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Deck Position Text
         deckTextHeader = {
-            type="toggle", name="Deck Position Text", dialogControl="CollapsibleHeader",
+            type="toggle", name="Deck Position Text", dialogControl="CollapsibleHeader", arcGroup="Texts",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.deckText end,
@@ -1268,7 +1358,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Proc Count Text
         procTextHeader = {
-            type="toggle", name="Proc Count Text", dialogControl="CollapsibleHeader",
+            type="toggle", name="Proc Count Text", dialogControl="CollapsibleHeader", arcGroup="Texts",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.procText end,

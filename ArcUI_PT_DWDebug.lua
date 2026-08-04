@@ -27,12 +27,386 @@ local logBox       = nil
 local dwFrame        = nil   -- CDM frame for DW buff
 local dwKnownInstIDs = {}  -- set of auraInstanceIDs confirmed as DW buff
 
+-- Forward declarations — defined in the Helpers section below, but the window
+-- model closes over them.
+local Push, Sep, SafeVal
+
+-- ── Ground-truth window model ─────────────────────────────────────────────────
+-- The DW buff's PRESENCE is fully non-secret (GetPlayerAuraBySpellID returns
+-- nil or a struct; the nil-check never throws and is never secret). One
+-- absent->present flip = one guaranteed real proc. Everything that happens
+-- while present is either a back-to-back proc (the buff's end time moves) or
+-- noise. Each window records what PT counted vs what actually happened.
+local dwPresent      = false
+local windowIdx      = 0
+local winStats       = nil
+local pendingCounted = 0     -- procs counted before the window officially opened
+local lastSource     = "?"   -- source tag of the most recent accepted attempt
+
+-- Ground truth is the CDM frame's own aura slot, NOT GetPlayerAuraBySpellID:
+-- the tracked aura's spellID is not necessarily DW_BUFF_ID (it can be an
+-- override or a linked spell), and the by-spellID read came back nil for the
+-- entire window on 12.1. `frame.auraInstanceID ~= nil` is a plain nil-check,
+-- which is never secret, and it tracked the window exactly in both logs.
+local function DWFrameHasAura()
+    return dwFrame ~= nil and dwFrame.auraInstanceID ~= nil
+end
+
+-- Shortest window seen this session = the buff's un-refreshed duration. Any
+-- window longer than that was re-timed, which is the only NON-SECRET proof a
+-- back-to-back proc happened (the cooldown args are secret, so nothing numeric
+-- about the duration itself is readable).
+local baseWindowLen = nil
+local LEN_EPS       = 0.5
+
+local function NewStats()
+    return { set=0, cleared=0, added=0, updated=0, pushes=0, pushFromRefresh=0,
+             refreshes=0, counted=0, extended=0, startT=GetTime() }
+end
+
+local function DumpWindowSummary(idx, s, endT)
+    if not s then return end
+    local len = endT - s.startT
+    -- Only a CLEAN window teaches us the un-refreshed duration: one counted proc
+    -- and no refresh signal. Seeding from any window (as the first version did)
+    -- lets a re-timed first window become the baseline and then fail its own
+    -- comparison.
+    local clean = s.counted <= 1 and s.updated == 0
+    if clean and (not baseWindowLen or len < baseWindowLen) then
+        baseWindowLen = len
+    end
+    if not baseWindowLen then
+        Push("WINDOW #"..idx.." SUMMARY",
+            string.format("length %.2fs  |  PT COUNTED %d  |  no clean window seen yet, "
+                .."so the un-refreshed duration is unknown — no verdict", len, s.counted), "info")
+        return
+    end
+    local retimed = (len - baseWindowLen) > LEN_EPS
+
+    -- Without a re-timing the window is worth exactly 1 proc. With one, it is
+    -- worth at least 2 -- but the buff's end time only records the LAST
+    -- re-timing, so the exact number of back-to-backs is not recoverable.
+    local truthMin = retimed and 2 or 1
+    local standalone = s.pushes - (s.pushFromRefresh or 0)
+
+    local verdict
+    if s.counted < truthMin then
+        verdict = "violation"
+    elseif not retimed and s.counted > 1 then
+        verdict = "violation"
+    else
+        verdict = "deck"
+    end
+
+    Push("WINDOW #"..idx.." SUMMARY",
+        string.format("length %.2fs (base %.2fs)%s  |  GROUND TRUTH %s proc(s)  |  PT COUNTED %d  |  "
+            .."signals: set=%d cleared=%d added=%d updated=%d refreshData=%d  "
+            .."cdPush=%d (%d from RefreshData, %d standalone)",
+            len, baseWindowLen, retimed and "  RE-TIMED" or "",
+            retimed and (">= "..truthMin) or "1",
+            s.counted, s.set, s.cleared, s.added, s.updated,
+            s.refreshes, s.pushes, s.pushFromRefresh or 0, standalone),
+        verdict)
+
+    if retimed then
+        -- How much the refresh added. NOTE: do not read this as "end == last
+        -- refresh + base duration" — that assumes a refresh resets to full, and
+        -- the observed data fits "each refresh adds a fixed amount" just as
+        -- well. Report the overrun and let repeated samples settle the model.
+        Push("  ^ RE-TIMED", string.format(
+            "window ran %.2fs longer than the un-refreshed %.2fs — the buff WAS re-timed, "
+            .."so >= 1 back-to-back proc happened",
+            len - baseWindowLen, baseWindowLen), "dw_gain")
+    end
+    if standalone > 0 then
+        Push("  ^ standalone push", standalone.." cooldown push(es) NOT caused by a RefreshData", "dw_gain")
+    end
+    if verdict == "violation" then
+        Push("  ^ MISCOUNT", string.format("PT counted %d, expected %s",
+            s.counted, retimed and (">= "..truthMin) or "exactly 1"), "violation")
+    end
+end
+
+-- ── Duration-object extension detector ────────────────────────────────────────
+-- The only non-secret way to know whether a cooldown push RESTARTED the DW
+-- window or merely re-fed the same remaining time: mirror each pushed durObj
+-- into its own shadow Cooldown and compare when they finish. A re-parse ends at
+-- the same moment as the push before it; a real back-to-back proc ends later by
+-- exactly the amount it extended the buff.
+local shadowPool   = {}
+local pushIdx      = 0
+local pushTime     = {}
+local endTime      = {}
+local pushStats    = {}   -- [idx] = the winStats table this push belongs to
+local comparable   = {}   -- [idx] = was the previous push part of the same window?
+local chainBreak   = 0    -- last push index of the window that just ended
+local shadowWarned = false
+local EXTEND_EPS   = 0.10   -- seconds; re-parses land within one frame
+
+local function ClassifyPush(idx)
+    local e = endTime[idx]
+    if not e then return end
+    -- Never compare across windows. Comparability is decided AT PUSH TIME —
+    -- classification runs after the window has closed, by which point the live
+    -- chain-break marker has already moved past this push.
+    local pe = comparable[idx] and endTime[idx-1] or nil
+    if not pe then
+        Push("cdPush #"..idx.." classify",
+            string.format("ended %.2fs after the push (first push of this window)",
+                e - (pushTime[idx] or e)), "dw_cdm")
+        return
+    end
+    local delta = e - pe
+    if delta > EXTEND_EPS then
+        -- Credit the window this push belonged to, not whatever window is open
+        -- now: extensions only resolve once the window has already closed.
+        local st = pushStats[idx]
+        if st then st.extended = st.extended + 1 end
+        Push("cdPush #"..idx.." = REAL PROC",
+            string.format("window END MOVED +%.2fs — back-to-back proc", delta), "dw_gain")
+    else
+        Push("cdPush #"..idx.." = re-parse",
+            string.format("end unchanged (%+.3fs) — NOT a proc", delta), "info")
+    end
+end
+
+local function ShadowDone(sh)
+    sh._free = true
+    local idx = sh._idx
+    if not idx then return end
+    endTime[idx] = GetTime()
+    if not enabled then return end
+    C_Timer.After(0.05, function() ClassifyPush(idx) end)
+end
+
+local function AcquireShadow()
+    for _, sh in ipairs(shadowPool) do
+        if sh._free then sh._free = false; return sh end
+    end
+    if #shadowPool >= 24 then
+        if not shadowWarned then
+            shadowWarned = true
+            Push("SHADOW POOL EXHAUSTED", "too many concurrent pushes — extension detection degraded", "warn")
+        end
+        return nil
+    end
+    local sh = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
+    sh:SetSize(1, 1)
+    sh:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", -100, -100)
+    sh:SetAlpha(0)
+    sh:EnableMouse(false)
+    sh:SetHideCountdownNumbers(true)
+    sh:SetScript("OnCooldownDone", function(self) ShadowDone(self) end)
+    sh._free = false
+    shadowPool[#shadowPool+1] = sh
+    return sh
+end
+
+local function TrackPush(durObj)
+    pushIdx = pushIdx + 1
+    local idx = pushIdx
+    pushTime[idx]   = GetTime()
+    pushStats[idx]  = winStats
+    comparable[idx] = (idx - 1) > chainBreak
+    local old = idx - 64
+    if old > 0 then
+        pushTime[old] = nil; endTime[old] = nil
+        pushStats[old] = nil; comparable[old] = nil
+    end
+    if winStats then winStats.pushes = winStats.pushes + 1 end
+    if not durObj then
+        Push("DW_CD.DurObjPush #"..idx, "nil durObj", "dw_cdm")
+        return
+    end
+    local sh = AcquireShadow()
+    if not sh then return end
+    sh._idx = idx
+    sh:SetCooldownFromDurationObject(durObj, true)
+    if not sh:IsShown() then
+        -- Zero-span push: nothing to time, and it means no window is running —
+        -- break the comparison chain so it can't be read as an end time.
+        sh._free = true
+        chainBreak = idx
+        Push("DW_CD.DurObjPush #"..idx, "zero-span (buff not running)", "dw_cdm")
+        return
+    end
+    Push("DW_CD.DurObjPush #"..idx, "cooldown re-fed — classification pending", "dw_cdm")
+end
+
+-- ── SetCooldown extension detector (the real path) ────────────────────────────
+-- CDM does NOT feed this frame a duration object. CooldownViewer.lua drives the
+-- swipe with CooldownFrame_Set(cooldownFrame, startTime, duration, ...) which
+-- lands on Cooldown:SetCooldown. Those args are computed inside Blizzard's
+-- SECURE execution, so they normally arrive here as real numbers even on 12.1
+-- (checked with issecretvalue anyway — if they are secret we say so instead of
+-- guessing, and SetCooldown must never be fed a secret).
+local lastEndTime   = nil
+local pendingPushAt = nil   -- GetTime() of a push waiting to be paired with a RefreshData
+
+local function TrackSetCooldown(start, duration)
+    pushIdx = pushIdx + 1
+    local idx = pushIdx
+    if winStats then winStats.pushes = winStats.pushes + 1 end
+
+    if issecretvalue and (issecretvalue(start) or issecretvalue(duration)) then
+        -- Confirmed on 12.1: the args arrive SECRET, so no numeric compare is
+        -- possible. The CALL is still a non-secret signal. RefreshCooldownInfo
+        -- pushes the swipe on every RefreshData, and RefreshData is rare on this
+        -- frame (it ignores override updates for other base spells), so a SECOND
+        -- push inside one window is a strong back-to-back candidate.
+        -- A push on its own means nothing: RefreshCooldownInfo re-pushes the
+        -- swipe on EVERY RefreshData while the aura is up, so pushes track
+        -- RefreshData one-for-one. Only a push with no RefreshData in the same
+        -- frame is a genuine re-timing. Pair them up in NoteRefreshData.
+        pendingPushAt = GetTime()
+        local n = winStats and winStats.pushes or 0
+        Push("DW_CD.SetCooldown #"..idx,
+            "args SECRET (no numeric classify)  hasAura="..tostring(DWFrameHasAura())
+            .."  pushInWindow="..n, "dw_cdm")
+        return
+    end
+
+    start    = tonumber(start)
+    duration = tonumber(duration)
+    if not start or not duration or duration <= 0 then
+        lastEndTime = nil
+        Push("DW_CD.SetCooldown #"..idx,
+            "zero/cleared (start="..tostring(start).." dur="..tostring(duration)..")", "dw_cdm")
+        return
+    end
+
+    local newEnd = start + duration
+    if not lastEndTime then
+        lastEndTime = newEnd
+        Push("DW_CD.SetCooldown #"..idx,
+            string.format("window START  dur=%.2fs  ends in %.2fs", duration, newEnd - GetTime()),
+            "dw_cdm")
+        return
+    end
+
+    local delta = newEnd - lastEndTime
+    lastEndTime = newEnd
+    if delta > EXTEND_EPS then
+        if winStats then winStats.extended = winStats.extended + 1 end
+        Push("DW_CD.SetCooldown #"..idx.." = REAL PROC",
+            string.format("end MOVED +%.2fs (dur=%.2fs) — back-to-back proc", delta, duration),
+            "dw_gain")
+    else
+        Push("DW_CD.SetCooldown #"..idx.." = re-parse",
+            string.format("end unchanged (%+.3fs) — NOT a proc", delta), "info")
+    end
+end
+
+-- ── SPELL_UPDATE_COOLDOWN trail ───────────────────────────────────────────────
+-- 12.0 gave SPELL_UPDATE_COOLDOWN a (spellID, baseSpellID, category,
+-- startRecoveryCategory, itemID) payload, and that payload is how the Fire Nova
+-- investigation detected a completely silent hidden proc. If a DW proc has its
+-- own spell-update signature, it will be in the few events immediately before
+-- the aura appears. Ring-buffer them all, dump the recent ones at the moment a
+-- proc is confirmed, and let the log say whether a signature exists.
+local sucRing, SUC_MAX = {}, 40
+
+local function NoteSpellUpdate(spellID, baseSpellID, category, startRecovery, itemID)
+    sucRing[#sucRing+1] = {
+        t = GetTime(), s = spellID, b = baseSpellID,
+        c = category, r = startRecovery, i = itemID,
+    }
+    if #sucRing > SUC_MAX then table.remove(sucRing, 1) end
+end
+
+local function DumpSpellUpdateTrail(window)
+    local now, shown = GetTime(), 0
+    for i = #sucRing, 1, -1 do
+        local e = sucRing[i]
+        if now - e.t > (window or 1.0) then break end
+        shown = shown + 1
+    end
+    if shown == 0 then
+        Push("  spell-update trail", "no SPELL_UPDATE_COOLDOWN in the last "
+            ..string.format("%.1fs", window or 1.0), "info")
+        return
+    end
+    for i = #sucRing - shown + 1, #sucRing do
+        local e = sucRing[i]
+        Push(string.format("  SUC -%.3fs", now - e.t),
+            "spellID="..SafeVal(e.s).."  base="..SafeVal(e.b)
+            .."  cat="..SafeVal(e.c).."  startRec="..SafeVal(e.r)
+            .."  item="..SafeVal(e.i), "rehook")
+    end
+end
+
+-- ── RefreshData storm counter ─────────────────────────────────────────────────
+-- Enh's Lightning Bolt <-> Tempest override churn makes CDM run RefreshData on
+-- every frame constantly. Logging each one would bury the timeline, so count
+-- them and report per second / per window instead.
+local rdBucket, rdBucketCount, rdLastLog = 0, 0, 0
+
+local function NoteRefreshData()
+    if winStats then winStats.refreshes = winStats.refreshes + 1 end
+    local now = GetTime()
+    -- Our RefreshData hook runs AFTER the method body, so any push it caused
+    -- has already been logged this frame. Pair them so the summary can tell
+    -- routine re-pushes apart from a genuine re-timing.
+    if pendingPushAt == now then
+        if winStats then winStats.pushFromRefresh = (winStats.pushFromRefresh or 0) + 1 end
+        pendingPushAt = nil
+    end
+    local sec = math.floor(now)
+    if sec ~= rdBucket then
+        if rdBucketCount > 5 then
+            Push("RefreshData storm", rdBucketCount.." calls on the DW frame in 1s", "warn")
+        end
+        rdBucket = sec
+        rdBucketCount = 0
+    end
+    rdBucketCount = rdBucketCount + 1
+    -- Throttled sample. RefreshData -> RefreshCooldownInfo -> CooldownFrame_Set
+    -- -> Cooldown:SetCooldown, so a RefreshData while the frame HOLDS AN AURA
+    -- that produces no SetCooldown line means the swipe is being driven through
+    -- some other widget/path than frame.Cooldown.
+    if now - rdLastLog >= 0.5 then
+        rdLastLog = now
+        Push("DW_CDM.RefreshData", "hasAura="..tostring(DWFrameHasAura()), "info")
+    end
+end
+
+local function CheckDWPresence()
+    local present = DWFrameHasAura()
+    if present == dwPresent then return end
+    dwPresent = present
+    if present then
+        windowIdx = windowIdx + 1
+        winStats = NewStats()
+        winStats.counted = pendingCounted
+        pendingCounted = 0
+        local secret = (issecretvalue and issecretvalue(dwFrame.auraInstanceID)) and "SECRET" or "readable"
+        Sep("DW WINDOW #"..windowIdx.." OPEN")
+        Push("DW PRESENT (ground truth)",
+            "CDM frame holds an aura = 1 guaranteed real proc   aid="..secret
+            .."  auraSpellID="..SafeVal(dwFrame.auraSpellID), "dw_gain")
+        DumpSpellUpdateTrail(1.0)
+    else
+        local idx, s = windowIdx, winStats
+        winStats    = nil
+        chainBreak  = pushIdx   -- nothing after this compares to this window
+        lastEndTime = nil
+        Push("DW ABSENT (ground truth)", "buff faded — window #"..idx.." closed", "dw_cast")
+        -- The final push's shadow finishes at the same instant the buff fades,
+        -- and classification defers 0.05s, so settle before summarising.
+        local endT = GetTime()
+        C_Timer.After(0.3, function()
+            if not enabled then return end
+            DumpWindowSummary(idx, s, endT)
+        end)
+    end
+end
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 local function TS()
     return string.format("%07.3f", GetTime() - sessionStart)
 end
 
-local function SafeVal(v)
+function SafeVal(v)
     if v == nil then return "nil" end
     if issecretvalue and issecretvalue(v) then return "<secret>" end
     return tostring(v)
@@ -54,7 +428,7 @@ local COLOR = {
     warn         = "FF8800",
 }
 
-local function Push(tag, detail, colorKey)
+function Push(tag, detail, colorKey)
     if not enabled or paused then return end
     local col = (type(colorKey) == "string" and #colorKey == 6 and colorKey:match("^%x+$"))
                 and colorKey
@@ -68,16 +442,26 @@ local function Push(tag, detail, colorKey)
     logDirty = true
 end
 
-local function Sep(label)
+function Sep(label)
     Push("──── " .. (label or "") .. " ────", "", "separator")
 end
 
 -- ── CDM frame finder ──────────────────────────────────────────────────────────
+-- Scan every viewer, not just the icon one: DW may be laid out as a CDM BAR.
+local CDM_VIEWERS = {
+    "BuffIconCooldownViewer",
+    "BuffBarCooldownViewer",
+    "EssentialCooldownViewer",
+    "UtilityCooldownViewer",
+}
+
 local function FindDWCDMFrame()
-    local viewer = _G["BuffIconCooldownViewer"]
-    if viewer and viewer.itemFramePool then
-        for frame in viewer.itemFramePool:EnumerateActive() do
-            if frame.cooldownID == DW_CDM_ID then return frame end
+    for _, viewerName in ipairs(CDM_VIEWERS) do
+        local viewer = _G[viewerName]
+        if viewer and viewer.itemFramePool then
+            for frame in viewer.itemFramePool:EnumerateActive() do
+                if frame.cooldownID == DW_CDM_ID then return frame, viewerName end
+            end
         end
     end
     return nil
@@ -91,25 +475,43 @@ local function HookDWCDMFrame(frame)
     if frame.OnAuraInstanceInfoSet then
         hooksecurefunc(frame, "OnAuraInstanceInfoSet", function(self)
             if not enabled then return end
+            -- Blizzard only calls this when ITS OWN compare in SetAuraInstanceInfo
+            -- saw a genuinely different instance/spell, so the firing itself is a
+            -- non-secret "the aura instance changed" signal.
             Push("DW_CDM.OnAuraInstanceInfoSet",
                 "instID="..SafeVal(self.auraInstanceID)
+                .."  auraSpellID="..SafeVal(self.auraSpellID)
+                .."  dwPresentBefore="..tostring(dwPresent)
                 .." tracking="..tostring(PT.DW and PT.DW.IsCDMTracking and PT.DW.IsCDMTracking()), "dw_cdm")
+            -- After CheckDWPresence: a Set that OPENS a window must be counted
+            -- into the window it opened, not into the previous (nil) one.
+            CheckDWPresence()   -- exact window boundary, don't wait for UNIT_AURA
+            if winStats then winStats.set = winStats.set + 1 end
         end)
     end
 
     if frame.OnAuraInstanceInfoCleared then
         hooksecurefunc(frame, "OnAuraInstanceInfoCleared", function(self)
             if not enabled then return end
+            if winStats then winStats.cleared = winStats.cleared + 1 end
+            -- A Cleared while the buff is still PRESENT means CDM lost track of
+            -- the aura and will re-Set it — that pair fakes a "new instance".
             Push("DW_CDM.OnAuraInstanceInfoCleared",
                 "prev="..SafeVal(self.auraInstanceID), "dw_cdm")
+            CheckDWPresence()   -- exact window boundary
         end)
     end
 
     if frame.OnUnitAuraAddedEvent then
         hooksecurefunc(frame, "OnUnitAuraAddedEvent", function(self)
             if not enabled then return end
+            if winStats then winStats.added = winStats.added + 1 end
+            -- CooldownViewer.lua calls this on EVERY active item frame for ANY
+            -- added-aura batch (Blizzard filters inside via NeedsAddedAuraUpdate).
+            -- So a fire while the DW buff is already up is unrelated noise.
             Push("DW_CDM.OnUnitAuraAddedEvent",
-                "instID="..SafeVal(self.auraInstanceID), "dw_cdm")
+                "instID="..SafeVal(self.auraInstanceID)
+                ..(dwPresent and "  |cffFF8800(DW already up — batch is NOT a DW proc)|r" or ""), "dw_cdm")
         end)
     end
 
@@ -118,8 +520,46 @@ local function HookDWCDMFrame(frame)
             if not enabled then return end
             local instID = self.auraInstanceID
             if not instID then return end
+            if winStats then winStats.updated = winStats.updated + 1 end
+            -- Dispatched only for frames mapped to this specific aura instance.
             Push("DW_CDM.OnUnitAuraUpdatedEvent",
                 "instID="..SafeVal(instID), "dw_cdm")
+        end)
+    end
+
+    if frame.RefreshData and not frame._arcPTDWDbgRDHooked then
+        frame._arcPTDWDbgRDHooked = true
+        hooksecurefunc(frame, "RefreshData", function()
+            if not enabled then return end
+            NoteRefreshData()
+        end)
+    end
+
+    -- 12.1 DISCRIMINATOR HUNT: a REAL proc (fresh OR back-to-back refresh) must
+    -- re-push fresh timing into the frame's Cooldown to restart the 10s swipe.
+    -- The push itself is a hookable, NON-SECRET event -- candidate replacement
+    -- for the aid==aid refresh check that dies on secret ids. We also mirror
+    -- every pushed durObj into a shadow Cooldown: its OnCooldownDone stamps the
+    -- TRUE buff end, which validates the 10s-per-proc timing model in the log.
+    -- Open question the log answers: do full-update re-parses re-push too?
+    local cd = frame.Cooldown
+    if cd and not cd._arcPTDWDbgCDHooked then
+        cd._arcPTDWDbgCDHooked = true
+        -- The path CDM actually uses (CooldownFrame_Set -> SetCooldown).
+        hooksecurefunc(cd, "SetCooldown", function(_, start, duration)
+            if not enabled then return end
+            TrackSetCooldown(start, duration)
+        end)
+        -- Kept as a fallback in case anything ever feeds this frame a durObj.
+        hooksecurefunc(cd, "SetCooldownFromDurationObject", function(_, durObj)
+            if not enabled then return end
+            TrackPush(durObj)
+        end)
+        hooksecurefunc(cd, "Clear", function()
+            if not enabled then return end
+            chainBreak  = pushIdx   -- window torn down; later pushes start fresh
+            lastEndTime = nil
+            Push("DW_CD.Clear", "cooldown cleared", "dw_cdm")
         end)
     end
 
@@ -127,9 +567,12 @@ local function HookDWCDMFrame(frame)
 end
 
 local function ScanAndHookFrames()
-    local f = FindDWCDMFrame()
+    local f, viewerName = FindDWCDMFrame()
     if f and f ~= dwFrame then
         dwFrame = f
+        Push("DW_CDM frame located", "viewer="..tostring(viewerName)
+            .."  Cooldown="..tostring(f.Cooldown ~= nil)
+            .."  Bar="..tostring(f.Bar ~= nil), "rehook")
         HookDWCDMFrame(f)
     end
 end
@@ -188,11 +631,32 @@ end
 local function WireDeckDebug()
     if not (PT and PT.DW) then return end
 
+    -- Every gain ATTEMPT, accepted or rejected, with the guard that killed it.
+    -- This is what exposes an over-count: the accepted source tells you which
+    -- hook path fed it, and the ground-truth window says whether it was real.
+    PT.DW.OnAttempt = function(source, accepted, reason)
+        if not enabled then return end
+        if accepted then
+            lastSource = tostring(source)
+            if winStats then
+                winStats.counted = winStats.counted + 1
+            else
+                pendingCounted = pendingCounted + 1
+            end
+        else
+            Push("attempt REJECTED",
+                "src="..tostring(source).."  reason="..tostring(reason)
+                .."  dwPresent="..tostring(dwPresent), "info")
+        end
+    end
+
     PT.DW.OnProc = function(deckNum, deckProcs, totalGain, deckPos)
         if not enabled then return end
-        Push("PROC GAINED",
-            "deck#"..tostring(deckNum).." procs="..tostring(deckProcs).."/3"
-            .." total#"..tostring(totalGain).." pos="..tostring(deckPos), "dw_gain")
+        Push("PROC COUNTED",
+            "src="..lastSource.."  deck#"..tostring(deckNum).." procs="..tostring(deckProcs).."/3"
+            .." total#"..tostring(totalGain).." pos="..tostring(deckPos)
+            ..(dwPresent and "  |cffFF8800(DW buff ALREADY up — must be a back-to-back to be real)|r" or ""),
+            "dw_gain")
     end
 
     PT.DW.OnDeckRollover = function(newDeckNum, prevProcs, violation)
@@ -209,13 +673,20 @@ local function UnwireDeckDebug()
     if not (PT and PT.DW) then return end
     PT.DW.OnProc        = nil
     PT.DW.OnDeckRollover = nil
+    PT.DW.OnAttempt     = nil
 end
 
 -- ── Event listener ────────────────────────────────────────────────────────────
 local dbgFrame = CreateFrame("Frame")
 
-dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
+dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3, a4, a5)
     if not enabled then return end
+
+    if event == "SPELL_UPDATE_COOLDOWN" then
+        -- Buffered only, never logged inline: this fires on every GCD.
+        NoteSpellUpdate(a1, a2, a3, a4, a5)
+        return
+    end
 
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         if a1 ~= "player" then return end
@@ -230,7 +701,28 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
 
     if event == "UNIT_AURA" then
         if a1 ~= "player" then return end
-        local info = a2; if not info then return end
+        -- Payload-free ground truth FIRST — this path never throws and never
+        -- goes secret, so it works identically in the open world and in a key.
+        CheckDWPresence()
+        local info = a2
+        -- A FULL UPDATE makes the viewer call RefreshLayout() and return, which
+        -- skips OnUnitAuraUpdatedEvent entirely -- so a buff refresh arriving in
+        -- a full-update batch would be invisible to our back-to-back path. Log
+        -- them while the window is open so a missed refresh can be pinned.
+        if dwPresent then
+            local fu = info and info.isFullUpdate
+            if not info then
+                Push("UNIT_AURA (window)", "no payload = FULL UPDATE — updated events SKIPPED", "warn")
+            elseif issecretvalue and issecretvalue(fu) then
+                Push("UNIT_AURA (window)", "isFullUpdate is SECRET — cannot tell", "warn")
+            elseif fu then
+                Push("UNIT_AURA (window)", "isFullUpdate=true — updated events SKIPPED this batch", "warn")
+            end
+        end
+        if not info then return end
+        -- 12.1: payload vectors are SECRET in restricted content (ipairs on
+        -- them THROWS, and their ids poison table keys) -- skip debug parsing
+        if issecretvalue and issecretvalue(info.isFullUpdate) then return end
         if info.addedAuras then
             for _, aura in ipairs(info.addedAuras) do
                 local sid = not (issecretvalue and issecretvalue(aura.spellId)) and tonumber(aura.spellId) or nil
@@ -352,7 +844,10 @@ local function BuildUI()
         Sep("MANUAL SCAN")
         Push("DW_CDM frame", dwFrame and "found cooldownID="..DW_CDM_ID or "NOT FOUND", dwFrame and "dw_cdm" or "warn")
         if dwFrame then
-            Push("DW_CDM instID", SafeVal(dwFrame.auraInstanceID), "dw_cdm")
+            Push("DW_CDM instID", SafeVal(dwFrame.auraInstanceID)
+                .."  auraSpellID="..SafeVal(dwFrame.auraSpellID)
+                .."  hasAura="..tostring(DWFrameHasAura())
+                .."  Cooldown="..tostring(dwFrame.Cooldown ~= nil), "dw_cdm")
         end
         local tracking = PT.DW and PT.DW.IsCDMTracking and PT.DW.IsCDMTracking()
         Push("IsCDMTracking", tostring(tracking), tracking and "dw_cdm" or "warn")
@@ -418,9 +913,25 @@ local function Enable()
     enabled      = true
     sessionStart = GetTime()
     log = {}; rawLog = {}
+    -- Reset the ground-truth window model
+    dwPresent      = false   -- seeded by the first CheckDWPresence below
+    windowIdx      = 0
+    winStats       = nil
+    pendingCounted = 0
+    pushIdx        = 0
+    pushTime       = {}
+    endTime        = {}
+    pushStats      = {}
+    comparable     = {}
+    chainBreak     = 0
+    lastEndTime    = nil
+    baseWindowLen  = nil
+    lastSource     = "?"
     dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
     dbgFrame:RegisterEvent("UNIT_AURA")
     dbgFrame:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
+    dbgFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+    sucRing = {}
     BuildUI()
     InstallSetCDIDHook()
     ScanAndHookFrames()
@@ -434,6 +945,9 @@ local function Enable()
     Push("INIT MSW", msw and "instID="..SafeVal(msw.auraInstanceID).." apps="..SafeVal(msw.applications) or "not active", msw and "msw_gain" or "info")
     local dw = C_UnitAuras.GetPlayerAuraBySpellID(DW_BUFF_ID)
     Push("INIT DW buff", dw and "instID="..SafeVal(dw.auraInstanceID) or "not active", dw and "dw_gain" or "info")
+    Push("HOW TO READ",
+        "each window prints GROUND TRUTH (1 fresh + N end-time extensions) vs what PT COUNTED; "
+        .."a MISCOUNT line means the deck is wrong", "info")
     Push("DW_CDM frame", dwFrame and "found" or "NOT FOUND — use Scan Frames after DW procs", dwFrame and "dw_cdm" or "warn")
     Push("IsCDMTracking", tostring(PT.DW and PT.DW.IsCDMTracking and PT.DW.IsCDMTracking()), "info")
 end

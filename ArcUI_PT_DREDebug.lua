@@ -119,6 +119,8 @@ local function EnableMSWLog()
     mswLogFrame:SetScript("OnEvent", function(_, _, _, info)
         if not enabled or paused then return end
         if not info then return end
+        -- 12.1: payload vectors are SECRET in restricted content (ipairs throws)
+        if issecretvalue and issecretvalue(info.isFullUpdate) then return end
         if info.addedAuras then
             for _, aura in ipairs(info.addedAuras) do
                 local sid = not (issecretvalue and issecretvalue(aura.spellId)) and tonumber(aura.spellId) or nil

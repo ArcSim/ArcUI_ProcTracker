@@ -28,10 +28,19 @@ local DW_INITIATORS = { [17364]=true, [115356]=true, [187874]=true }
 local DW_CAST_ID    = 384352
 
 -- ── State ─────────────────────────────────────────────────────────────────────
+-- PRESENCE MODEL (12.1 rework): MSW is a single aura on the player, so instead
+-- of instance-keyed maps fed by the UNIT_AURA payload (whose vectors are SECRET
+-- in 12.1 restricted content -- iterating them THROWS -- and whose spellId
+-- fields go secret, silently dropping MSW), we track one presence flag + one
+-- stack cache, re-derived from C_UnitAuras.GetPlayerAuraBySpellID on every
+-- player aura event. By-spellID reads stay functional under restriction (MSW is
+-- gameplay-whitelisted; the call returns nil/struct, never throws) and the
+-- nil-check is never secret. apps == 0 means "count unknown" (consume falls
+-- back to 10, the pre-rework behavior for unknown counts).
 local msw = {
-    auraInstanceID  = nil,
-    activeInstances = {},
-    instanceApps    = {},
+    present         = false,
+    auraInstanceID  = nil,   -- kept ONLY when non-secret (used for == compares)
+    apps            = 0,
     spenderCastID   = nil,
     spenderCastTime = 0,
 }
@@ -70,24 +79,34 @@ function PT.MSW.Unsubscribe(event, fn)
     end
 end
 
--- ── Init from live aura ────────────────────────────────────────────────────────
-function PT.MSW.InitFromLive()
+-- ── Live read (secret-guarded field extraction) ───────────────────────────────
+local function ReadLive()
     local live = C_UnitAuras.GetPlayerAuraBySpellID and
                  C_UnitAuras.GetPlayerAuraBySpellID(MSW_SPELL_ID)
-    if live and live.auraInstanceID then
-        local n = not (issecretvalue and issecretvalue(live.applications))
-                  and tonumber(live.applications) or 0
-        msw.auraInstanceID = live.auraInstanceID
-        msw.activeInstances[live.auraInstanceID] = true
-        msw.instanceApps[live.auraInstanceID]    = n
+    if not live then return false, nil, nil end
+    local aid, apps
+    if not (issecretvalue and issecretvalue(live.auraInstanceID)) then
+        aid = live.auraInstanceID
     end
+    if not (issecretvalue and issecretvalue(live.applications)) then
+        apps = tonumber(live.applications)
+    end
+    return true, aid, apps
+end
+
+-- ── Init from live aura ────────────────────────────────────────────────────────
+function PT.MSW.InitFromLive()
+    local present, aid, apps = ReadLive()
+    msw.present        = present
+    msw.auraInstanceID = aid
+    msw.apps           = (apps and apps > 0) and apps or 0
 end
 
 -- ── Reset ─────────────────────────────────────────────────────────────────────
 function PT.MSW.Reset()
+    msw.present         = false
     msw.auraInstanceID  = nil
-    msw.activeInstances = {}
-    msw.instanceApps    = {}
+    msw.apps            = 0
     msw.spenderCastID   = nil
     msw.spenderCastTime = 0
     ascendanceActive    = false
@@ -97,6 +116,32 @@ function PT.MSW.Reset()
     mswTotalConsumedNoAsc = 0
     mswTotalStacksNoAsc   = 0
     -- Note: do NOT clear subscriber tables — decks re-subscribe on OnEnable
+end
+
+-- ── Consume/expire dispatch (shared by removal + same-batch replacement) ──────
+local function FireConsumeOrExpire(stacksSpent, aidGone)
+    local now          = GetTime()
+    local spenderFound = msw.spenderCastID ~= nil
+                        and (now - msw.spenderCastTime) < 0.3
+    local spenderID    = spenderFound and msw.spenderCastID or nil
+    msw.spenderCastID   = nil
+    msw.spenderCastTime = 0
+
+    if spenderFound then
+        mswTotalConsumed  = mswTotalConsumed + 1
+        mswTotalStacksAll = mswTotalStacksAll + stacksSpent
+        if not ascendanceActive then
+            mswTotalConsumedNoAsc = mswTotalConsumedNoAsc + 1
+            mswTotalStacksNoAsc   = mswTotalStacksNoAsc + stacksSpent
+        end
+        for _, fn in ipairs(PT.MSW.OnConsumed) do
+            fn(stacksSpent, spenderID, ascendanceActive)
+        end
+    else
+        for _, fn in ipairs(PT.MSW.OnExpired) do
+            fn(aidGone, stacksSpent)
+        end
+    end
 end
 
 -- ── Event frame ───────────────────────────────────────────────────────────────
@@ -135,15 +180,12 @@ mswFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
                 msw.spenderCastID   = sid
                 msw.spenderCastTime = GetTime()
             end
-            -- Sync live stack count at cast time
-            if msw.auraInstanceID then
-                local a = C_UnitAuras.GetPlayerAuraBySpellID(MSW_SPELL_ID)
-                if a and a.auraInstanceID == msw.auraInstanceID and a.applications then
-                    local n = not (issecretvalue and issecretvalue(a.applications))
-                              and tonumber(a.applications)
-                    if n and n > (msw.instanceApps[msw.auraInstanceID] or 0) then
-                        msw.instanceApps[msw.auraInstanceID] = n
-                    end
+            -- Sync live stack count at cast time (presence model: no aid
+            -- compare -- MSW is a single aura, the live read IS our instance)
+            if msw.present then
+                local _p, _aid, apps = ReadLive()
+                if apps and apps > (msw.apps or 0) then
+                    msw.apps = apps
                 end
             end
         end
@@ -157,82 +199,54 @@ mswFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     end
 
     -- ── UNIT_AURA ─────────────────────────────────────────────────────────────
+    -- 12.1 REWORK: the payload is not used AT ALL. Its vectors are secret in
+    -- restricted content (ipairs THROWS before any guard runs -- the bug that
+    -- froze every deck), and its spellId fields go secret even when readable.
+    -- Instead: every player aura change re-reads the ONE aura we care about by
+    -- spell id and diffs PRESENCE. Event-driven, zero polling, works identically
+    -- on live 12.0 and in 12.1 restricted content.
     if event == "UNIT_AURA" then
-        local info = a2; if not info then return end
+        local present, aid, apps = ReadLive()
 
-        -- addedAuras — track new MSW instances
-        if info.addedAuras then
-            for _, aura in ipairs(info.addedAuras) do
-                local auraInstID = aura.auraInstanceID
-                local sid = not (issecretvalue and issecretvalue(aura.spellId))
-                            and tonumber(aura.spellId) or nil
-                if sid == MSW_SPELL_ID then
-                    msw.activeInstances[auraInstID] = true
-                    msw.auraInstanceID = auraInstID
-                    local n2 = not (issecretvalue and issecretvalue(aura.applications))
-                               and tonumber(aura.applications) or 1
-                    msw.instanceApps[auraInstID] = (n2 > 0) and n2 or 1
-                    for _, fn in ipairs(PT.MSW.OnGained) do
-                        fn(auraInstID, msw.instanceApps[auraInstID])
-                    end
-                end
+        if present and not msw.present then
+            -- GAINED
+            msw.present        = true
+            msw.auraInstanceID = aid
+            msw.apps           = (apps and apps > 0) and apps or 0
+            for _, fn in ipairs(PT.MSW.OnGained) do
+                fn(aid, msw.apps)
             end
-        end
 
-        -- removedAuraInstanceIDs — consume or expire
-        if info.removedAuraInstanceIDs then
-            for _, instID in ipairs(info.removedAuraInstanceIDs) do
-                if msw.activeInstances[instID] then
-                    msw.activeInstances[instID] = nil
-                    if instID == msw.auraInstanceID then msw.auraInstanceID = nil end
-
-                    local cached      = msw.instanceApps[instID] or 10
-                    local stacksSpent = math.min(10, cached > 0 and cached or 10)
-                    msw.instanceApps[instID] = nil
-
-                    local now          = GetTime()
-                    local spenderFound = msw.spenderCastID ~= nil
-                                        and (now - msw.spenderCastTime) < 0.3
-                    local spenderID    = spenderFound and msw.spenderCastID or nil
-                    msw.spenderCastID   = nil
-                    msw.spenderCastTime = 0
-
-                    if spenderFound then
-                        mswTotalConsumed  = mswTotalConsumed + 1
-                        mswTotalStacksAll = mswTotalStacksAll + stacksSpent
-                        if not ascendanceActive then
-                            mswTotalConsumedNoAsc = mswTotalConsumedNoAsc + 1
-                            mswTotalStacksNoAsc   = mswTotalStacksNoAsc + stacksSpent
-                        end
-                        for _, fn in ipairs(PT.MSW.OnConsumed) do
-                            fn(stacksSpent, spenderID, ascendanceActive)
-                        end
-                    else
-                        for _, fn in ipairs(PT.MSW.OnExpired) do
-                            fn(instID, stacksSpent)
-                        end
-                    end
+        elseif present and msw.present then
+            -- Same instance = stack update. DIFFERENT instance (both aids
+            -- readable, plain == on non-secrets) = a consume + regain landed
+            -- in one event batch: fire the consume, then the gain.
+            local replaced = aid ~= nil and msw.auraInstanceID ~= nil
+                            and aid ~= msw.auraInstanceID
+            if replaced then
+                local cached = msw.apps or 0
+                local spent  = math.min(10, cached > 0 and cached or 10)
+                local gone   = msw.auraInstanceID
+                FireConsumeOrExpire(spent, gone)
+                msw.auraInstanceID = aid
+                msw.apps           = (apps and apps > 0) and apps or 0
+                for _, fn in ipairs(PT.MSW.OnGained) do
+                    fn(aid, msw.apps)
                 end
+            else
+                if apps and apps > 0 then msw.apps = apps end
+                if aid ~= nil then msw.auraInstanceID = aid end
             end
-        end
 
-        -- updatedAuraInstanceIDs — keep stack count fresh
-        if info.updatedAuraInstanceIDs and msw.auraInstanceID then
-            for _, instID in ipairs(info.updatedAuraInstanceIDs) do
-                if instID == msw.auraInstanceID then
-                    local live = C_UnitAuras.GetPlayerAuraBySpellID(MSW_SPELL_ID)
-                    if live and live.applications then
-                        local apps = live.applications
-                        if not (issecretvalue and issecretvalue(apps)) then
-                            local n = tonumber(apps)
-                            if n and n > 0 then
-                                msw.instanceApps[msw.auraInstanceID] = n
-                            end
-                        end
-                    end
-                    break
-                end
-            end
+        elseif (not present) and msw.present then
+            -- REMOVED: consume (spender window decides) or expire
+            local cached = msw.apps or 0
+            local spent  = math.min(10, cached > 0 and cached or 10)
+            local gone   = msw.auraInstanceID
+            msw.present        = false
+            msw.auraInstanceID = nil
+            msw.apps           = 0
+            FireConsumeOrExpire(spent, gone)
         end
         return
     end

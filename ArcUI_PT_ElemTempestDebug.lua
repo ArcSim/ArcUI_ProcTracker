@@ -11,6 +11,7 @@ local MAELSTROM_SPENDERS = {
 }
 
 local log      = {}
+local enabled  = false   -- fully inert until the user runs /pt etdebug
 local paused   = false
 local logDirty = false
 local sessionStart = GetTime()
@@ -20,12 +21,14 @@ local function TS()
 end
 
 local function Push(tag, detail)
-    if paused then return end
+    if not enabled or paused then return end
     table.insert(log, TS().." "..string.format("%-45s", tag).." "..(detail or ""))
+    if #log > 4000 then table.remove(log, 1) end
     logDirty = true
 end
 
 local function PushState(label)
+    if not enabled then return end
     local configID = C_ClassTalents.GetActiveConfigID()
     local specIndex = GetSpecialization()
     local specID = specIndex and select(1, GetSpecializationInfo(specIndex)) or nil
@@ -49,13 +52,9 @@ PT.ElemTempest.OnDebug = function(tag, detail)
     Push(tag, detail)
 end
 
--- Log key events that affect visibility
+-- Log key events that affect visibility. NOT registered at load: events only
+-- start flowing when the user enables the debugger (zero idle cost otherwise).
 local visFrame = CreateFrame("Frame")
-visFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-visFrame:RegisterEvent("PLAYER_LOGIN")
-visFrame:RegisterEvent("TRAIT_CONFIG_UPDATED")
-visFrame:RegisterEvent("PLAYER_TALENT_UPDATE")
-visFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 visFrame:SetScript("OnEvent", function(self, event)
     Push("EVENT", event)
     C_Timer.After(0.05, function() PushState("  state@0.05s") end)
@@ -63,10 +62,8 @@ visFrame:SetScript("OnEvent", function(self, event)
     C_Timer.After(2.0,  function() PushState("  state@2.0s") end)
 end)
 
--- Log spellcasts and SPELL_UPDATE_CD 454015
+-- Log spellcasts and SPELL_UPDATE_CD 454015 (registered on enable only)
 local dbgFrame = CreateFrame("Frame")
-dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-dbgFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 dbgFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
@@ -88,12 +85,18 @@ dbgFrame:SetScript("OnEvent", function(self, event, ...)
     end
 end)
 
--- Log initial state after load
-C_Timer.After(0.1,  function() PushState("INIT@0.1s") end)
-C_Timer.After(0.5,  function() PushState("INIT@0.5s") end)
-C_Timer.After(1.0,  function() PushState("INIT@1.0s") end)
-C_Timer.After(2.0,  function() PushState("INIT@2.0s") end)
-C_Timer.After(5.0,  function() PushState("INIT@5.0s") end)
+-- Enable: flip the gate and start the event flow (once)
+local function EnsureEnabled()
+    if enabled then return end
+    enabled = true
+    visFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    visFrame:RegisterEvent("TRAIT_CONFIG_UPDATED")
+    visFrame:RegisterEvent("PLAYER_TALENT_UPDATE")
+    visFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+    dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    dbgFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+    PushState("DEBUG ENABLED")
+end
 
 -- ── Window ────────────────────────────────────────────────────────────────────
 local window = nil
@@ -193,12 +196,14 @@ local function BuildWindow()
 end
 
 local function EnableSilent()
+    EnsureEnabled()
     paused = false
     print("|cff44FF44ProcTracker:|r ElemTempest debug logging started. /pt etdebug to open.")
 end
 
 PT.ElemTempestDebug = {
     Toggle      = function()
+        EnsureEnabled()
         if window and window:IsShown() then window:Hide()
         else BuildWindow() end
     end,

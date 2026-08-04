@@ -93,11 +93,16 @@ local function HookCDMFrame(frame)
             if not tempEnabled then return end
             local instID = self.auraInstanceID
             if not instID then return end
-            if instID ~= prevTempInstID then
-                TDbg("CDM instID", tostring(prevTempInstID).." -> "..tostring(instID))
-                prevTempInstID = instID
+            -- 12.1: aid can be SECRET in instances -- == / ~= on a secret
+            -- throws. prevTempInstID only ever stores non-secret ids; when the
+            -- incoming id is secret we skip the compare and keep the old one.
+            local secret = issecretvalue and issecretvalue(instID)
+            local changed = secret or prevTempInstID == nil or instID ~= prevTempInstID
+            if changed then
+                TDbg("CDM instID", SafeVal(prevTempInstID).." -> "..SafeVal(instID))
+                if not secret then prevTempInstID = instID end
             end
-            cdm.instID = instID
+            cdm.instID = instID   -- presence semantics only (nil-checked downstream)
         end)
     end
     if frame.OnAuraInstanceInfoCleared then
@@ -202,7 +207,7 @@ local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
     local snapDeckAtConsume = snap.deckNumber  -- log for debugging boundary cases
     AdvanceDeck(stacksSpent)
     TDbg("MSW consume", "stacks="..stacksSpent
-        .." instIDAtConsume="..tostring(instIDAtConsume)
+        .." instIDAtConsume="..SafeVal(instIDAtConsume)
         .." snapDeck="..tostring(snapDeckAtConsume)
         .." deckNow="..tostring(tempDeckNumber)
         .." deckPos="..(tempTotalStacks % DECK_SIZE))
@@ -219,12 +224,12 @@ local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
             local age = (GetTime() - consumeTime) * 1000
             local instIDNow = cdm.instID or prevTempInstID
             if spellCDFiredAt then
-                TDbg("SPELL_UPDATE_CD 454015 IGNORED (already seen)", string.format("age=%.1fms instID=%s", age, tostring(instIDNow)))
+                TDbg("SPELL_UPDATE_CD 454015 IGNORED (already seen)", string.format("age=%.1fms instID=%s", age, SafeVal(instIDNow)))
             elseif age > 5 then
-                TDbg("SPELL_UPDATE_CD 454015 IGNORED (too late)", string.format("age=%.1fms > 5ms instID=%s", age, tostring(instIDNow)))
+                TDbg("SPELL_UPDATE_CD 454015 IGNORED (too late)", string.format("age=%.1fms > 5ms instID=%s", age, SafeVal(instIDNow)))
             else
                 spellCDFiredAt = GetTime()
-                TDbg("SPELL_UPDATE_CD 454015 COUNTED", string.format("age=%.1fms instID=%s atConsume=%s", age, tostring(instIDNow), tostring(instIDAtConsume)))
+                TDbg("SPELL_UPDATE_CD 454015 COUNTED", string.format("age=%.1fms instID=%s atConsume=%s", age, SafeVal(instIDNow), SafeVal(instIDAtConsume)))
             end
         end
     end)
@@ -236,14 +241,14 @@ local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
         local instIDNow = cdm.instID or prevTempInstID
         -- Debug info only — AD consumed = had instID at consume, now nil
         local adConsumedInWindow = adInstIDAtConsume ~= nil and adCDM.instID == nil
-        TDbg("RULE1 check", "atConsume="..tostring(instIDAtConsume).." now="..tostring(instIDNow)
+        TDbg("RULE1 check", "atConsume="..SafeVal(instIDAtConsume).." now="..SafeVal(instIDNow)
             .." spellCD="..(spellCDFiredAt and "YES" or "NO")
             .." adInstAtConsume="..SafeVal(adInstIDAtConsume)
             .." adInstNow="..SafeVal(adCDM.instID)
             .." adConsumed="..(adConsumedInWindow and "YES" or "NO")
             .." snapDeck="..tostring(snapDeckAtConsume).." deckNow="..tostring(tempDeckNumber))
         if spellCDFiredAt then
-            TDbg("RULE1 FIRE (SPELL_UPDATE_CD 454015)", "instID="..tostring(instIDNow))
+            TDbg("RULE1 FIRE (SPELL_UPDATE_CD 454015)", "instID="..SafeVal(instIDNow))
             CreditProc("RULE1")
         else
             TDbg("RULE1 NO PROC", "no SPELL_UPDATE_CD 454015")
