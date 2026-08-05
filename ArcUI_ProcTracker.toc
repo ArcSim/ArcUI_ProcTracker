@@ -2,7 +2,7 @@
 ## Title: ArcUI ProcTracker
 ## Notes: Deck proc tracking — DW, Tempest, DRE, and more. /pt for options.
 ## Author: Arc
-## Version: 1.1.1
+## Version: 1.1.2
 ## SavedVariables: ArcUI_ProcTrackerDB
 ## X-Curse-Project-ID: 1516247
 
@@ -14,6 +14,8 @@ Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 Libs\AceGUI-3.0\AceGUI-3.0.xml
 Libs\AceConfig-3.0\AceConfig-3.0.xml
 Libs\AceGUI-3.0-CollapsibleHeader\AceGUI-3.0-CollapsibleHeader.lua
+Libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+Libs\AceGUI-3.0-SharedMediaWidgets\widget.xml
 Libs\ArcSkin-1.0\ArcSkin-1.0.lua
 
 ArcUI_PT_Core.lua

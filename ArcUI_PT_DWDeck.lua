@@ -31,14 +31,9 @@ local dwSnapTotal      = 0   -- pre-advance snapshot for THIS consume's proc che
 local dwLastAuraInstID = nil
 local dwAuraActive     = false  -- DW buff up? driven by CDM's own Set/Cleared calls
 local dwLastClearedAt  = 0      -- when CDM last cleared its aura slot (flap detection)
--- A Set this soon after a Clear is CDM flapping, not a proc. The flap is a
--- SAME-FRAME event: on 12.0.x any CooldownViewerSettings.OnDataChanged runs
--- RefreshLayout -> itemFramePool:ReleaseAll() -> re-Acquire, so every item
--- frame's aura slot is cleared and immediately re-set inside one rebuild.
--- 12.1 added OnCooldownDataChanged, which updates in place when the frame count
--- is unchanged and therefore never clears the slot -- so on 12.1 this guard
--- simply never fires. 0.1s is one rebuild's worth of slack, nothing more.
-local FLAP_WINDOW      = 0.1
+-- Only used when the aura instance id is SECRET (12.1) and the exact
+-- same-instance test is therefore unavailable. See the Set hook below.
+local FLAP_WINDOW      = 0.5
 local dwCDMFrame       = nil
 local dwProcThisConsume= false
 local dwLastProcTime   = 0
@@ -182,19 +177,29 @@ local function HookDWFrame(frame)
         if self ~= dwCDMFrame then return end
         local instID = self.auraInstanceID
         if not instID then return end
-        -- ONE rule, both branches: a Set arriving right after a Clear is CDM
-        -- flapping its own slot for an aura that never left, not a new proc.
-        -- Deliberately NOT an id comparison: the id is readable on live but
-        -- always <secret> on 12.1, so an id test can only ever work on one
-        -- branch and would leave the other unguarded. Timing works on both --
-        -- observed flaps re-set in the SAME frame as the clear, while a genuine
-        -- proc needs fresh MSW spends and cannot land this soon after the buff
-        -- actually ended.
-        if (GetTime() - dwLastClearedAt) <= FLAP_WINDOW then
-            -- Constant string on purpose: this fires on every CDM rebuild (many
-            -- per second on live), and building the message here would allocate
-            -- even with the debugger closed.
-            Attempt("CDM_SET", false, "CDM flap (re-set immediately after a clear)")
+        -- CDM flapping its own aura slot is not a proc. On 12.0.x any
+        -- CooldownViewerSettings.OnDataChanged runs RefreshLayout ->
+        -- itemFramePool:ReleaseAll() -> re-Acquire, so every frame's aura slot
+        -- is cleared and immediately re-set inside one rebuild. 12.1 added
+        -- OnCooldownDataChanged, which refreshes in place and never clears.
+        --
+        -- Two tests, because the two branches expose different information:
+        --   id READABLE (live 12.0.x) -- a re-Set of the SAME instance is exact
+        --     proof of a flap. This is the test that was validated against live
+        --     logs (478 == 478).
+        --   id SECRET (12.1) -- no id test is possible, so fall back to the
+        --     flap's timing signature. Flaps re-set in the same frame, while a
+        --     genuine proc needs fresh MSW spends and cannot land that fast
+        --     after the buff actually ended.
+        local same = SameAuraID(instID, dwLastAuraInstID)
+        if same == true then
+            Attempt("CDM_SET", false, "same aura instance (CDM re-set, not a proc)")
+            return
+        end
+        if same == nil and (GetTime() - dwLastClearedAt) <= FLAP_WINDOW then
+            -- Constant string: never build a message on a path that can fire
+            -- repeatedly with the debugger closed.
+            Attempt("CDM_SET", false, "suspected CDM flap (re-set right after a clear, id unreadable)")
             return
         end
         dwAuraActive     = true

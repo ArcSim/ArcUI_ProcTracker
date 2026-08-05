@@ -1,4 +1,4 @@
--- ArcUI_PT_Core.lua
+﻿-- ArcUI_PT_Core.lua
 -- ProcTracker: icon widget factory, per-deck options panel, /pt slash command.
 -- No detection logic here. Decks register via PT.RegisterDeck().
 -- No pcall. Zero polling.
@@ -9,13 +9,13 @@ local InitMinimapButton  -- forward declare
 local BuildOptionsPanel   -- forward declare
 local LDB, LDBIcon        -- forward declare (real assignment near minimap section)
 
--- ── Registry ──────────────────────────────────────────────────────────────────
+-- â”€â”€ Registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- Each entry: { id, name, deckSize, procs, defaultIcon, widget, optPanel,
 --               GetDeckPos, GetProcs, OnReset, OnEnable, OnDisable }
 local registry  = {}   -- ordered list
-local registryMap = {} -- id → entry
+local registryMap = {} -- id â†’ entry
 
--- ── SavedVariables helpers ────────────────────────────────────────────────────
+-- â”€â”€ SavedVariables helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local DB_NAME = "ArcUI_ProcTrackerDB"
 
 local function GetDB()
@@ -40,7 +40,79 @@ local ICON_DEFAULTS = {
     lockPosition=false,
     textOnly=false,
     textsUnlocked=false,
+    hideOOC=false,   -- opt-in: hide this widget while out of combat
+    -- Fonts are PER TEXT (deckFont / procFont / violFont). nil = game default,
+    -- otherwise a LibSharedMedia font name.
 }
+
+-- â”€â”€ Shared media â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- LibSharedMedia is a single shared registry, so the font list here automatically
+-- includes anything other addons have registered -- ArcUI's fonts show up without
+-- ProcTracker needing to know ArcUI exists.
+local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
+local DEFAULT_FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
+
+function PT.ResolveFont(name)
+    if name and LSM then
+        local path = LSM:Fetch("font", name, true)
+        if path then return path end
+    end
+    return DEFAULT_FONT
+end
+
+-- Applying a font can FAIL silently: SetFont with a path the client cannot load
+-- leaves the FontString with no font at all, which renders as nothing. That is
+-- what made text vanish when cycling fonts. Always verify with GetFont and fall
+-- back to the game font, so a bad pick degrades instead of blanking the text.
+function PT.SetFontSafe(fs, fontName, size, flags)
+    if not fs then return end
+    size  = math.max(1, math.floor(tonumber(size) or 12))
+    flags = flags or "OUTLINE"
+
+    -- SetFont RETURNS a boolean; on failure the FontString silently KEEPS its
+    -- previous font. Checking GetFont() afterwards is useless because it hands
+    -- back that old font rather than nil, so a failed change looks identical to
+    -- a successful one and the text just never updates. Trust the return value.
+    local path = PT.ResolveFont(fontName)
+    if fs:SetFont(path, size, flags) == false then
+        -- The chosen font could not be loaded. Try it without the outline flag
+        -- (some TTFs only fail with flags), then fall back to the game font so
+        -- the text is never left blank.
+        if fs:SetFont(path, size, "") == false then
+            fs:SetFont(DEFAULT_FONT, size, flags)
+        end
+    end
+    -- Last resort: a FontString with no font at all renders nothing.
+    if not fs:GetFont() then
+        fs:SetFont(DEFAULT_FONT, size, flags)
+    end
+end
+
+-- Values table for an AceConfig select. Empty when LSM is missing, in which case
+-- the option hides itself rather than showing a broken dropdown.
+function PT.FontValues()
+    local t = {}
+    if LSM then
+        for _, name in ipairs(LSM:List("font")) do t[name] = name end
+    end
+    return t
+end
+
+function PT.HasSharedMedia() return LSM ~= nil end
+
+-- Applies the icon's three fonts directly, with no dependence on the rest of
+-- the redraw. Mirrors PT.ApplyBarFonts so a font pick always lands even if the
+-- surrounding update path bails out for some other reason.
+function PT.ApplyIconFonts(entry)
+    local w = entry and entry.widget
+    if not w then return end
+    local db = ArcUI_ProcTrackerDB and ArcUI_ProcTrackerDB.icons
+                and ArcUI_ProcTrackerDB.icons[entry.id]
+    if not db then return end
+    PT.SetFontSafe(w._deckText, db.deckFont, db.deckSize)
+    PT.SetFontSafe(w._procText, db.procFont, db.procSize)
+    PT.SetFontSafe(w._violText, db.violFont, db.violSize or 12)
+end
 
 local function IconDB(id)
     local db = GetDB()
@@ -53,7 +125,7 @@ local function IconDB(id)
     return t
 end
 
--- ── Border helpers (same method as CDMEnhance) ───────────────────────────────
+-- â”€â”€ Border helpers (same method as CDMEnhance) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function GetClassColor()
     local _, class = UnitClass("player")
     local c = RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
@@ -111,13 +183,13 @@ local function UpdateBorder(frame, db, anchor)
     edges.right:SetWidth(thickness); edges.right:SetVertexColor(r,g,b,a); edges.right:Show()
 end
 
--- ── AceConfig locals (declared early for widget helpers) ─────────────────────
+-- â”€â”€ AceConfig locals (declared early for widget helpers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local AceConfig         = LibStub("AceConfig-3.0", true)
 local AceConfigDialog   = LibStub("AceConfigDialog-3.0", true)
 local AceConfigRegistry = LibStub("AceConfigRegistry-3.0", true)
 local PT_OPTIONS_NAME   = "ArcUI_ProcTracker_Options"
 
--- ── Widget helpers ────────────────────────────────────────────────────────────
+-- â”€â”€ Widget helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function ProcColor(db, procs, maxProcs)
     if db.procCountDown then
         local rem = maxProcs - procs
@@ -168,6 +240,7 @@ local function UpdateIcon(entry)
             local g = db.violG or 0.2
             local b = db.violB or 0.2
             w._violText:SetTextColor(r, g, b)
+            PT.SetFontSafe(w._violText, db.violFont, db.violSize or 12)
             w._violText:SetText(tostring(v))
             w._violText:ClearAllPoints()
             w._violText:SetPoint("CENTER", w._icon, "CENTER", db.violOffX or 0, db.violOffY or -20)
@@ -182,7 +255,6 @@ local function UpdateIcon(entry)
     local procs    = entry.GetProcs()
     local pos      = db.countDown and (deckSize - raw) or raw
     local r, g, b  = ProcColor(db, procs, maxProcs)
-    local font     = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
     local suffix   = db.showDeckSuffix and ("/" .. deckSize) or ""
     local procDisp = db.procCountDown and (maxProcs - procs) or procs
     local procSuffix = db.showProcSuffix and ("/" .. maxProcs) or ""
@@ -199,21 +271,21 @@ local function UpdateIcon(entry)
         end
     end
 
-    w._deckText:SetFont(font, db.deckSize, "OUTLINE")
+    PT.SetFontSafe(w._deckText, db.deckFont, db.deckSize)
     w._deckText:SetShadowOffset(1, -1); w._deckText:SetShadowColor(0, 0, 0, 1)
     w._deckText:SetText(tostring(pos) .. suffix)
     w._deckText:SetTextColor(db.deckR, db.deckG, db.deckB)
     w._deckText:ClearAllPoints()
     w._deckText:SetPoint("CENTER", w._icon, "CENTER", db.deckOffX, db.deckOffY)
 
-    w._procText:SetFont(font, db.procSize, "OUTLINE")
+    PT.SetFontSafe(w._procText, db.procFont, db.procSize)
     w._procText:SetShadowOffset(1, -1); w._procText:SetShadowColor(0, 0, 0, 1)
     w._procText:SetText(tostring(procDisp) .. procSuffix)
     w._procText:SetTextColor(r, g, b)
     w._procText:ClearAllPoints()
     w._procText:SetPoint("CENTER", w._icon, "CENTER", db.procOffX, db.procOffY)
 
-    -- Border — hidden in text-only mode, otherwise applied to icon texture
+    -- Border â€” hidden in text-only mode, otherwise applied to icon texture
     if textOnly then
         if w._arcPTBorderEdges then
             for _, t in pairs(w._arcPTBorderEdges) do t:Hide() end
@@ -233,14 +305,14 @@ local function ApplyIconSize(f, w, h)
     if f._icon then f._icon:SetSize(w, h) end
 end
 
--- ── Text drag handles ────────────────────────────────────────────────────────
+-- â”€â”€ Text drag handles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- Creates an invisible mouse-enabled frame on top of a FontString.
 -- When "unlock texts" is on, dragging the handle updates the offset DB keys
 -- (offXKey/offYKey relative to the icon's CENTER) and refreshes the icon.
 -- onRefresh() is called after drag stop so the options panel updates.
 local function MakeTextDragHandle(parent, fontString, anchorTo, getDB, offXKey, offYKey, onRefresh)
     -- Manual drag with OnMouseDown/OnMouseUp (NOT RegisterForDrag) so motion
-    -- starts the instant the button is pressed — no WoW drag threshold.
+    -- starts the instant the button is pressed â€” no WoW drag threshold.
 
     local h = CreateFrame("Frame", nil, parent)
     h:SetFrameStrata(parent:GetFrameStrata())
@@ -342,7 +414,7 @@ local function ApplyTextDragHandleState(entry, unlocked)
     end
 end
 
--- ── Widget helpers (continued) ───────────────────────────────────────────────
+-- â”€â”€ Widget helpers (continued) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 local function BuildIconWidget(entry)
     local db    = IconDB(entry.id)
@@ -377,7 +449,7 @@ local function BuildIconWidget(entry)
     f:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         -- Save the FULL anchor description, not just offsets. SetClampedToScreen
-        -- can change the anchor type during drag (e.g. CENTER → BOTTOMLEFT) so
+        -- can change the anchor type during drag (e.g. CENTER â†’ BOTTOMLEFT) so
         -- saving only x/y and re-applying as CENTER/CENTER puts the icon at a
         -- different screen position on reload.
         local point, _, relPoint, x, y = self:GetPoint()
@@ -432,7 +504,7 @@ local function BuildIconWidget(entry)
         function() return IconDB(id) end, "violOffX", "violOffY",
         function() UpdateIcon(entry) end)
 
-    -- CDM tracking warning overlay — yellow tint + ! text when CDM frame not hooked
+    -- CDM tracking warning overlay â€” yellow tint + ! text when CDM frame not hooked
     local cdmWarn = f:CreateTexture(nil, "OVERLAY")
     cdmWarn:SetAllPoints(icon)
     cdmWarn:SetColorTexture(1, 0.85, 0, 0.25)
@@ -449,7 +521,7 @@ local function BuildIconWidget(entry)
     f._cdmWarnText = cdmWarnText
 
     entry.widget = f
-    -- Respect saved deckEnabled state — don't show if user disabled the icon
+    -- Respect saved deckEnabled state â€” don't show if user disabled the icon
     local idb = IconDB(entry.id)
     if idb.deckEnabled == false then
         f:Hide()
@@ -473,7 +545,7 @@ local function BuildIconWidget(entry)
             -- (deckEnabled hide should not affect bar)
             local idb2 = IconDB(entry.id)
             if idb2.deckEnabled ~= false then
-                -- This is a talent-driven hide — also hide bar
+                -- This is a talent-driven hide â€” also hide bar
                 if entry.barWidget then entry.barWidget:Hide() end
                 if entry.barWidget and entry.barWidget._deckTextFrame then entry.barWidget._deckTextFrame:Hide() end
                 if entry.barWidget and entry.barWidget._procTextFrame then entry.barWidget._procTextFrame:Hide() end
@@ -484,7 +556,7 @@ local function BuildIconWidget(entry)
     return f
 end
 
--- ── AceConfig options ────────────────────────────────────────────────────────
+-- â”€â”€ AceConfig options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local collapsedSections = {}  -- session-only collapse state per deck
 
 GetDeckNS = function(id)
@@ -513,8 +585,8 @@ local function BuildDeckOptionsGroup(entry)
         name = entry.name,
         args = {
 
-            -- ── WIDGET (master toggle lives WITH the icon options; the header
-            -- is never hidden so a disabled deck can be re-enabled) ───────────
+            -- â”€â”€ WIDGET (master toggle lives WITH the icon options; the header
+            -- is never hidden so a disabled deck can be re-enabled) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             iconHeader = {
                 type = "header", name = "Widget", order = o(),
             },
@@ -558,6 +630,27 @@ local function BuildDeckOptionsGroup(entry)
                     refresh()
                 end,
             },
+            hideOOC = {
+                type  = "toggle", name = "Hide Out of Combat",
+                desc  = "Hide this icon whenever you are not in combat, and show it again when combat starts.",
+                order = o(), width = 1.2,
+                hidden = iconHidden,
+                get   = function() return db().hideOOC == true end,
+                set   = function(_, v)
+                    db().hideOOC = v
+                    local wf = entry.widget
+                    if wf then
+                        if not v then
+                            -- Restore immediately and clear our ownership flag
+                            -- so nothing later re-hides it.
+                            wf._ptHiddenByOOC = nil
+                            if db().deckEnabled ~= false then wf:Show() end
+                        else
+                            PT.RefreshCombatVisibility()
+                        end
+                    end
+                end,
+            },
             textsUnlocked = {
                 type  = "toggle", name = "Unlock Texts (Drag to Position)",
                 desc  = "Enables click-and-drag on the deck, proc, and violation texts. A faint blue overlay marks the draggable area. Disable to lock and click-through.",
@@ -581,7 +674,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── CDM TRACKING (rides in the Widget tab) ────────────────────────
+            -- â”€â”€ CDM TRACKING (rides in the Widget tab) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             cdmHeader = {
                 type = "header", name = "CDM Tracking", order = o(),
                 hidden = function() return iconHidden() or entry.noCDMWarn end,
@@ -592,9 +685,9 @@ local function BuildDeckOptionsGroup(entry)
                     local ns = GetDeckNS(entry.id)
                     local ok = ns and ns.IsCDMTracking and ns.IsCDMTracking()
                     if ok then
-                        return "|cff44FF44CDM frame hooked — tracking active|r"
+                        return "|cff44FF44CDM frame hooked â€” tracking active|r"
                     else
-                        return "|cffFF4444CDM frame NOT found — detection disabled|r"
+                        return "|cffFF4444CDM frame NOT found â€” detection disabled|r"
                     end
                 end,
                 order = o(), width = "full",
@@ -624,7 +717,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── POSITION & SIZE ───────────────────────────────────────────────
+            -- â”€â”€ POSITION & SIZE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             posHeader = {
                 type = "header", name = "Position & Size", order = o(),
                 hidden = iconHidden,
@@ -686,7 +779,7 @@ local function BuildDeckOptionsGroup(entry)
             },
             iconScale = {
                 type = "range", name = "Scale",
-                desc = "Scales the entire icon widget uniformly — multiplies all sizes",
+                desc = "Scales the entire icon widget uniformly â€” multiplies all sizes",
                 min = 0.5, max = 3.0, step = 0.05,
                 order = o(), width = "full",
                 hidden = iconHidden,
@@ -798,7 +891,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── DECK POSITION TEXT ────────────────────────────────────────────
+            -- â”€â”€ DECK POSITION TEXT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             deckTextHeader = {
                 type = "header", name = "Deck Position Text", order = o(),
                 hidden = iconHidden,
@@ -816,6 +909,16 @@ local function BuildDeckOptionsGroup(entry)
                 hidden = iconHidden,
                 get   = function() return db().showDeckSuffix end,
                 set   = function(_, v) db().showDeckSuffix = v; refresh() end,
+            },
+            deckFont = {
+                type = "select", name = "Font",
+                desc = "Font for the deck position text. Includes fonts shared by other addons, such as ArcUI.",
+                order = o(), width = 1.2,
+                dialogControl = "LSM30_Font",
+                hidden = function() return iconHidden() or not PT.HasSharedMedia() end,
+                values = function() return PT.FontValues() end,
+                get  = function() return db().deckFont end,
+                set  = function(_, v) db().deckFont = v; PT.ApplyIconFonts(entry); refresh() end,
             },
             deckSize = {
                 type = "range", name = "Font Size",
@@ -873,7 +976,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── PROC COUNT TEXT ───────────────────────────────────────────────
+            -- â”€â”€ PROC COUNT TEXT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             procTextHeader = {
                 type = "header", name = "Proc Count", order = o(),
                 hidden = iconHidden,
@@ -891,6 +994,16 @@ local function BuildDeckOptionsGroup(entry)
                 hidden = iconHidden,
                 get   = function() return db().showProcSuffix end,
                 set   = function(_, v) db().showProcSuffix = v; refresh() end,
+            },
+            procFont = {
+                type = "select", name = "Font",
+                desc = "Font for the proc count text. Includes fonts shared by other addons, such as ArcUI.",
+                order = o(), width = 1.2,
+                dialogControl = "LSM30_Font",
+                hidden = function() return iconHidden() or not PT.HasSharedMedia() end,
+                values = function() return PT.FontValues() end,
+                get  = function() return db().procFont end,
+                set  = function(_, v) db().procFont = v; PT.ApplyIconFonts(entry); refresh() end,
             },
             procSize = {
                 type = "range", name = "Font Size",
@@ -971,8 +1084,8 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- ── VIOLATIONS (lives in the Proc Count section: no own header;
-            -- the violation counter is a proc-count companion) ────────────────
+            -- â”€â”€ VIOLATIONS (lives in the Proc Count section: no own header;
+            -- the violation counter is a proc-count companion) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             showViolations = {
                 type  = "toggle", name = "Show Violation Counter",
                 desc  = "Shows a count of decks that had wrong proc count. Disabled by default.",
@@ -986,6 +1099,18 @@ local function BuildDeckOptionsGroup(entry)
                     UpdateIcon(entry)
                 end,
             },
+            violFont = {
+                type = "select", name = "Font",
+                desc = "Font for the violation counter text. Includes fonts shared by other addons, such as ArcUI.",
+                order = o(), width = 1.2,
+                dialogControl = "LSM30_Font",
+                hidden = function()
+                    return iconHidden() or not db().showViolations or not PT.HasSharedMedia()
+                end,
+                values = function() return PT.FontValues() end,
+                get  = function() return db().violFont end,
+                set  = function(_, v) db().violFont = v; PT.ApplyIconFonts(entry); refresh() end,
+            },
             violSize = {
                 type = "range", name = "Font Size",
                 min = 6, max = 32, step = 1,
@@ -994,10 +1119,10 @@ local function BuildDeckOptionsGroup(entry)
                 get  = function() return db().violSize or 12 end,
                 set  = function(_, v)
                     db().violSize = v
-                    local w = entry.widget
-                    if w and w._violText then
-                        w._violText:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", v, "OUTLINE")
-                    end
+                    -- Go through the normal redraw rather than setting the font
+                    -- here: hardcoding the default font meant changing the size
+                    -- silently threw away the user's chosen violation font.
+                    refresh()
                 end,
             },
             violColor = {
@@ -1077,7 +1202,7 @@ local function BuildDeckOptionsGroup(entry)
                     if w and w._violTextHandle and w._violTextHandle._resync then w._violTextHandle._resync() end
                 end,
             },
-            -- ── BORDER ────────────────────────────────────────────────────────
+            -- â”€â”€ BORDER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             borderHeader = {
                 type = "header", name = "Border", order = o(),
                 hidden = iconHidden,
@@ -1131,7 +1256,7 @@ local function BuildMasterOptionsTable()
     local args = {}
     local order = 1
 
-    -- ── General tab (appears last) ───────────────────────────────────────────
+    -- â”€â”€ General tab (appears last) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     args.general = {
         type        = "group",
         name        = "General",
@@ -1215,7 +1340,7 @@ local function BuildMasterOptionsTable()
             args = {
                 resetDesc = {
                     type = "description", order = 1, width = "full",
-                    name = "Resets this deck's tracking — deck position and proc count back to zero. Applies to both the Icon widget and the Bar.",
+                    name = "Resets this deck's tracking â€” deck position and proc count back to zero. Applies to both the Icon widget and the Bar.",
                 },
                 resetDeck = {
                     type  = "execute", name = "Reset Deck Tracking",
@@ -1300,10 +1425,24 @@ local function OpenSkinnedOptions(entry)
     return true
 end
 
+-- Both option paths call this after opening: force opted-in widgets visible for
+-- the duration of the session, and arm the OnHide hook that restores normal
+-- visibility on close. Deferred because the frame does not exist until the
+-- window has actually been built.
+local function ArmOptionsPreview()
+    C_Timer.After(0.05, function()
+        if PT.WatchOptionsFrame then PT.WatchOptionsFrame() end
+        if PT.RefreshCombatVisibility then PT.RefreshCombatVisibility() end
+    end)
+end
+
 BuildOptionsPanel = function(entry)
     -- the Arc look is the DEFAULT (Arc's call); Classic is the opt-out
     local db = ArcUI_ProcTrackerDB
-    if not (db and db.classicOptions) and OpenSkinnedOptions(entry) then return end
+    if not (db and db.classicOptions) and OpenSkinnedOptions(entry) then
+        ArmOptionsPreview()
+        return
+    end
 
     if not AceConfig or not AceConfigDialog then
         print("|cffFF4444ProcTracker:|r AceConfig not available")
@@ -1315,8 +1454,10 @@ BuildOptionsPanel = function(entry)
     local frame = AceConfigDialog.OpenFrames and AceConfigDialog.OpenFrames[PT_OPTIONS_NAME]
     if frame and frame.frame and frame.frame:IsShown() then
         AceConfigDialog:Close(PT_OPTIONS_NAME)
+        if PT.RefreshCombatVisibility then PT.RefreshCombatVisibility() end
     else
         AceConfigDialog:Open(PT_OPTIONS_NAME)
+        ArmOptionsPreview()
         if entry then
             C_Timer.After(0.05, function()
                 AceConfigDialog:SelectGroup(PT_OPTIONS_NAME, entry.id)
@@ -1342,9 +1483,9 @@ BuildOptionsPanel = function(entry)
         end)
     end
 end
--- ── Public API ────────────────────────────────────────────────────────────────
+-- â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- Deck modules subscribe here to retry registration on PLAYER_ENTERING_WORLD
-PT.OnEnterWorld = {}  -- array of functions — deck modules subscribe to retry registration
+PT.OnEnterWorld = {}  -- array of functions â€” deck modules subscribe to retry registration
 
 -- PT.RegisterDeck(def)
 -- def = {
@@ -1365,7 +1506,7 @@ function PT.RegisterDeck(def)
     assert(def.procs,       "PT.RegisterDeck: missing procs")
     assert(def.GetDeckPos,  "PT.RegisterDeck: missing GetDeckPos")
     assert(def.GetProcs,    "PT.RegisterDeck: missing GetProcs")
-    -- Idempotent — ignore if already registered with this id
+    -- Idempotent â€” ignore if already registered with this id
     if registryMap[def.id] then return end
     def.defaultIcon = def.defaultIcon or 136048
     def.widget   = nil
@@ -1396,18 +1537,106 @@ function PT.ForEachDeck(fn)
     for _, entry in ipairs(registry) do fn(entry) end
 end
 
--- Safe show for talent-driven visibility — respects user's deckEnabled setting.
+-- â”€â”€ Out-of-combat hiding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- Opt-in per deck. This is layered ON TOP of the existing gates rather than
+-- replacing them: a widget shows only if the user enabled it AND (it is not set
+-- to hide out of combat OR we are in combat). Talent visibility still owns
+-- whether Show is attempted at all.
+local function InCombat()
+    return InCombatLockdown() or UnitAffectingCombat("player")
+end
+
+-- While the options panel is open, widgets are forced visible even when set to
+-- hide out of combat -- otherwise the thing you are configuring is invisible
+-- exactly when you are trying to position it. Works for both the Arc skin
+-- window and the classic AceConfig one.
+local function GetOptionsFrame()
+    local skin = LibStub and LibStub("ArcSkin-1.0", true)
+    local sw = skin and skin.GetOptionsWindow and skin:GetOptionsWindow(PT_OPTIONS_NAME)
+    if sw and sw.frame then return sw.frame end
+    local af = AceConfigDialog and AceConfigDialog.OpenFrames
+               and AceConfigDialog.OpenFrames[PT_OPTIONS_NAME]
+    return af and af.frame or nil
+end
+
+function PT.OptionsShown()
+    local f = GetOptionsFrame()
+    return (f and f:IsShown()) and true or false
+end
+
+-- Re-evaluate when the panel closes, however it was closed (X, Escape, /pt).
+-- Hooked once per frame; HookScript cannot be removed, so guard with a flag.
+function PT.WatchOptionsFrame()
+    local f = GetOptionsFrame()
+    if not f or f._ptOOCHooked then return end
+    f._ptOOCHooked = true
+    f:HookScript("OnHide", function() PT.RefreshCombatVisibility() end)
+end
+
+-- The single "should an opted-in widget be visible right now" test.
+local function ShouldShowOOC()
+    return InCombat() or PT.OptionsShown()
+end
+PT.ShouldShowOOC = ShouldShowOOC
+
+local function CombatAllowsIcon(idb)
+    return not idb.hideOOC or ShouldShowOOC()
+end
+
+function PT.CombatAllowsShow(idb)
+    return CombatAllowsIcon(idb)
+end
+
+-- Safe show for talent-driven visibility â€” respects user's deckEnabled setting.
 -- Deck modules call this instead of entry.widget:Show() directly.
 function PT.ShowDeckIconIfEnabled(id)
     local entry = registryMap[id]
     if not entry or not entry.widget then return end
     local idb = IconDB(id)
-    if idb.deckEnabled ~= false then
+    if idb.deckEnabled ~= false and CombatAllowsIcon(idb) then
         entry.widget:Show()
     end
 end
 
--- ── Lifecycle ─────────────────────────────────────────────────────────────────
+-- Re-evaluate every widget's combat visibility. Called on combat start/end and
+-- whenever the option is toggled. Only ever acts on decks that opted in, so a
+-- deck with hideOOC off is never touched here and keeps its existing state.
+function PT.RefreshCombatVisibility()
+    local shouldShow = ShouldShowOOC()
+    for _, entry in ipairs(registry) do
+        local idb = IconDB(entry.id)
+        local w = entry.widget
+        if w then
+            if idb.hideOOC then
+                if shouldShow then
+                    w._ptHiddenByOOC = nil
+                    if idb.deckEnabled ~= false then w:Show() end
+                else
+                    w._ptHiddenByOOC = true
+                    w:Hide()
+                end
+            elseif w._ptHiddenByOOC then
+                -- Option was turned off while we had it hidden: undo OUR hide
+                -- only, never anything hidden by deckEnabled or talent gating.
+                w._ptHiddenByOOC = nil
+                if idb.deckEnabled ~= false then w:Show() end
+            end
+        end
+        if PT.ApplyBarVisibility then
+            PT.ApplyBarVisibility(entry)
+        end
+    end
+end
+
+local combatWatch = CreateFrame("Frame")
+combatWatch:RegisterEvent("PLAYER_REGEN_DISABLED")
+combatWatch:RegisterEvent("PLAYER_REGEN_ENABLED")
+-- PLAYER_ENTERING_WORLD so a widget set to hide out of combat starts hidden at
+-- login and after a reload, instead of showing until the first combat ends.
+combatWatch:RegisterEvent("PLAYER_ENTERING_WORLD")
+combatWatch:SetScript("OnEvent", function() PT.RefreshCombatVisibility() end)
+
+-- â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local watchFrame = CreateFrame("Frame")
 watchFrame:RegisterEvent("ADDON_LOADED")
 watchFrame:RegisterEvent("PLAYER_LOGIN")
@@ -1450,7 +1679,7 @@ watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
         -- (C_ClassTalents is not ready at ADDON_LOADED on fresh login)
         for _, fn in ipairs(PT.OnEnterWorld) do fn() end
         for _, entry in ipairs(registry) do
-            -- Only reset on fresh login — NOT on reload or zone transition
+            -- Only reset on fresh login â€” NOT on reload or zone transition
             if isLogin and not isReload then
                 if entry.OnReset then entry.OnReset() end
             end
@@ -1461,12 +1690,12 @@ watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
 
 end)
 
--- ── CDM change detection ────────────────────────────────────────────────────
+-- â”€â”€ CDM change detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- RefreshLayout calls itemFramePool:ReleaseAll() silently (no ClearCooldownID),
 -- then acquires new frames and calls SetCooldownID. So hooking ClearCooldownID
 -- never fires on remove. The correct signal is:
---   1. CooldownViewerSettings.OnDataChanged  — fires when user adds/removes in CDM UI
---   2. hooksecurefunc CooldownViewerMixin.OnAcquireItemFrame — fires after ReleaseAll
+--   1. CooldownViewerSettings.OnDataChanged  â€” fires when user adds/removes in CDM UI
+--   2. hooksecurefunc CooldownViewerMixin.OnAcquireItemFrame â€” fires after ReleaseAll
 --      for each new frame, letting us invalidate stale refs and rehook
 -- Both paths funnel into SchedulePTCDMRehook which nils stale frames + rehooks.
 local _ptCDMRehookPending = false
@@ -1487,7 +1716,7 @@ local function SchedulePTCDMRehook()
     if _ptCDMRehookPending then return end
     _ptCDMRehookPending = true
     -- Rehook immediately so the frame ref is restored ASAP.
-    -- Do NOT update the overlay yet — CDM reassigns within milliseconds in combat.
+    -- Do NOT update the overlay yet â€” CDM reassigns within milliseconds in combat.
     -- Only show ! if the frame is STILL missing after 1s.
     for _, entry in ipairs(registry) do
         if not entry.noCDMWarn then
@@ -1511,30 +1740,30 @@ local function SchedulePTCDMRehook()
 end
 
 local function InstallCDMMixinHooks()
-    -- Hook SetCooldownID on the mixin — fires during RefreshData after ReleaseAll
+    -- Hook SetCooldownID on the mixin â€” fires during RefreshData after ReleaseAll
     if CooldownViewerItemDataMixin and CooldownViewerItemDataMixin.SetCooldownID then
         if not CooldownViewerItemDataMixin._arcPTCDMSetHooked then
             CooldownViewerItemDataMixin._arcPTCDMSetHooked = true
             hooksecurefunc(CooldownViewerItemDataMixin, "SetCooldownID", function(self, cooldownID)
-                -- Fires for EVERY frame after a reshuffle — just schedule rehook
+                -- Fires for EVERY frame after a reshuffle â€” just schedule rehook
                 SchedulePTCDMRehook()
             end)
         end
     end
-    -- Hook OnAcquireItemFrame on CooldownViewerMixin — fires right after ReleaseAll
+    -- Hook OnAcquireItemFrame on CooldownViewerMixin â€” fires right after ReleaseAll
     -- for each new frame. This is our earliest signal that a reshuffle happened.
     if CooldownViewerMixin and CooldownViewerMixin.OnAcquireItemFrame then
         if not CooldownViewerMixin._arcPTAcquireHooked then
             CooldownViewerMixin._arcPTAcquireHooked = true
             hooksecurefunc(CooldownViewerMixin, "OnAcquireItemFrame", function()
-                -- ReleaseAll just happened — all our cached frame refs are now stale
+                -- ReleaseAll just happened â€” all our cached frame refs are now stale
                 InvalidateAllCDMFrames()
                 SchedulePTCDMRehook()
             end)
         end
     end
     -- EventRegistry: CooldownViewerSettings.OnDataChanged fires when user
-    -- adds/removes/reorders in CDM settings panel — earliest possible signal
+    -- adds/removes/reorders in CDM settings panel â€” earliest possible signal
     if EventRegistry and EventRegistry.RegisterCallback then
         EventRegistry:RegisterCallback("CooldownViewerSettings.OnDataChanged", function()
             InvalidateAllCDMFrames()
@@ -1544,9 +1773,9 @@ local function InstallCDMMixinHooks()
 end
 InstallCDMMixinHooks()
 
--- ── Slash command ─────────────────────────────────────────────────────────────
--- ── Combat reset events ─────────────────────────────────────────────────────
--- All decks share the same reset conditions — managed centrally here.
+-- â”€â”€ Slash command â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- â”€â”€ Combat reset events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- All decks share the same reset conditions â€” managed centrally here.
 local function ResetAllDecks()
     -- Reset shared MSW module first so deck resets see clean state
     if PT.MSW and PT.MSW.Reset then PT.MSW.Reset() end
@@ -1588,7 +1817,7 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
             -- players INSIDE at the yellow-gate drop; zoning out across the drop
             -- ("the skip") keeps the deck. When a skipper zones back in, the
             -- client syncs the already-running key timer and fires a load-sync
-            -- WORLD_STATE_TIMER_START — which can land within the 9s arm window
+            -- WORLD_STATE_TIMER_START â€” which can land within the 9s arm window
             -- if the skip was fast, wrongly resetting the addon deck. A genuine
             -- gate-drop event fires while standing in the world; a load-sync one
             -- fires right after PLAYER_ENTERING_WORLD. Reject the latter.
@@ -1600,10 +1829,10 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
     end
 end)
 
--- /pt           → list decks
--- /pt dw        → open DW icon options
--- /pt reset dw  → reset DW deck
--- ── Minimap button ───────────────────────────────────────────────────────────
+-- /pt           â†’ list decks
+-- /pt dw        â†’ open DW icon options
+-- /pt reset dw  â†’ reset DW deck
+-- â”€â”€ Minimap button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LDB     = LibStub and LibStub("LibDataBroker-1.1", true)
 LDBIcon = LibStub and LibStub("LibDBIcon-1.0", true)
 
@@ -1646,7 +1875,7 @@ local ptLDB = LDB and LDB:NewDataObject("ArcUI_ProcTracker", {
 
 InitMinimapButton = function()
     if not LDB or not LDBIcon or not ptLDB then
-        print("|cffFF4444ProcTracker:|r LibDBIcon not found — minimap button unavailable")
+        print("|cffFF4444ProcTracker:|r LibDBIcon not found â€” minimap button unavailable")
         return
     end
     local db = GetDB()
@@ -1682,16 +1911,16 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt <id> → open panel on that deck's tab
+    -- /pt <id> â†’ open panel on that deck's tab
     local entry = registryMap[arg]
     if entry then
         BuildOptionsPanel(entry)
         return
     end
 
-    -- /pt tdebug → toggle Tempest timeline debugger
-    -- /pt tdebug start → silent background logging (no window)
-    -- /pt tdebug export → open window and trigger export
+    -- /pt tdebug â†’ toggle Tempest timeline debugger
+    -- /pt tdebug start â†’ silent background logging (no window)
+    -- /pt tdebug export â†’ open window and trigger export
     if arg == "tdebug" or arg:sub(1,7) == "tdebug " then
         if not ArcUI_PT_TempestDebug then
             print("|cffFF4444ProcTracker:|r TempestDebug not loaded")
@@ -1714,9 +1943,9 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt etdebug → toggle Elemental Tempest timeline debugger
-    -- /pt etdebug start → silent background logging
-    -- /pt etdebug export → open window and export
+    -- /pt etdebug â†’ toggle Elemental Tempest timeline debugger
+    -- /pt etdebug start â†’ silent background logging
+    -- /pt etdebug export â†’ open window and export
     if arg == "etdebug" or arg:sub(1,8) == "etdebug " then
         if not PT.ElemTempestDebug then
             print("|cffFF4444ProcTracker:|r ElemTempestDebug not loaded")
@@ -1736,8 +1965,8 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt dwdebug → toggle Doom Winds timeline debugger
-    -- /pt dwdebug export → open window and export
+    -- /pt dwdebug â†’ toggle Doom Winds timeline debugger
+    -- /pt dwdebug export â†’ open window and export
     if arg == "dwdebug" or arg:sub(1,8) == "dwdebug " then
         if not ArcUI_PT_DWDebug then
             print("|cffFF4444ProcTracker:|r DWDebug not loaded")
@@ -1753,7 +1982,7 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt dredebug → toggle DRE Ascendance deck debugger
+    -- /pt dredebug â†’ toggle DRE Ascendance deck debugger
     if arg == "dredebug" then
         if not ArcUI_PT_DREDebug then
             print("|cffFF4444ProcTracker:|r DREDebug not loaded")

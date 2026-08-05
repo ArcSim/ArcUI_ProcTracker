@@ -1,10 +1,10 @@
--- ArcUI_PT_Bar.lua
+﻿-- ArcUI_PT_Bar.lua
 -- Bar widget for ProcTracker decks.
 -- StatusBar fill, tick marks at exact proc positions, two independent text frames.
 -- Text frames support free-drag OR anchor-to-bar with offset.
 -- No pcall. Zero polling.
 
--- ── Bar textures ──────────────────────────────────────────────────────────────
+-- â”€â”€ Bar textures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local BAR_TEXTURES = {
     ["Blizzard"]   = "Interface\\TargetingFrame\\UI-StatusBar",
     ["Solid"]      = "Interface\\Buttons\\WHITE8X8",
@@ -32,7 +32,7 @@ local ANCHOR_POINT_KEYS = {
     "FREE","TOPLEFT","TOP","TOPRIGHT","LEFT","CENTER","RIGHT","BOTTOMLEFT","BOTTOM","BOTTOMRIGHT"
 }
 
--- ── SavedVariables defaults ───────────────────────────────────────────────────
+-- â”€â”€ SavedVariables defaults â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local BAR_DEFAULTS = {
     barEnabled     = false,
     barX=0, barY=130,
@@ -43,6 +43,7 @@ local BAR_DEFAULTS = {
     barStrata      = "HIGH",
     barLevel       = 5,
     barLockPos     = false,
+    barHideOOC     = false,   -- opt-in: hide this bar while out of combat
     barTexture     = "Blizzard",
     -- single fill color (overrides the state colors when enabled)
     barFillSingle  = false,
@@ -137,11 +138,11 @@ local BAR_APPEARANCE_KEYS = {
     "barProcCountDown","barProcShowSuffix",
 }
 
--- ── Per-deck proc position tracking ──────────────────────────────────────────
+-- â”€â”€ Per-deck proc position tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local procPositions = {}
 local lastProcCount = {}
 
--- ── DB helpers ────────────────────────────────────────────────────────────────
+-- â”€â”€ DB helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function GetDB()
     ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
     return ArcUI_ProcTrackerDB
@@ -167,7 +168,7 @@ local function BarDB(id)
     return t
 end
 
--- ── Proc color (for text — uses barEmpty/Half/Full) ─────────────────────────
+-- â”€â”€ Proc color (for text â€” uses barEmpty/Half/Full) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function TextProcColor(db, procs, maxProcs)
     if db.barProcCountDown then
         local rem = maxProcs - procs
@@ -181,7 +182,7 @@ local function TextProcColor(db, procs, maxProcs)
     end
 end
 
--- ── Per-text state color (each text has its own independent state colors) ──────
+-- â”€â”€ Per-text state color (each text has its own independent state colors) â”€â”€â”€â”€â”€â”€
 local function DeckTextStateColor(db, procs, maxProcs)
     if db.barProcCountDown then
         local rem = maxProcs - procs
@@ -208,7 +209,7 @@ local function ProcTextStateColor(db, procs, maxProcs)
     end
 end
 
--- ── Bar fill color (separate empty override for the bar texture itself) ───────
+-- â”€â”€ Bar fill color (separate empty override for the bar texture itself) â”€â”€â”€â”€â”€â”€â”€
 local function BarFillColor(db, procs, maxProcs)
     -- single-color mode: one fixed fill regardless of proc state
     if db.barFillSingle then
@@ -230,7 +231,7 @@ local function BarFillColor(db, procs, maxProcs)
     end
 end
 
--- ── Text anchor ───────────────────────────────────────────────────────────────
+-- â”€â”€ Text anchor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function ApplyTextAnchor(tf, barFrame, anchor, offX, offY, freeX, freeY)
     tf:ClearAllPoints()
     if anchor == "FREE" or not barFrame then
@@ -240,7 +241,7 @@ local function ApplyTextAnchor(tf, barFrame, anchor, offX, offY, freeX, freeY)
     end
 end
 
--- ── Update ────────────────────────────────────────────────────────────────────
+-- â”€â”€ Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function HideAllBarElements(entry)
     local bw = entry.barWidget
     if bw then bw:Hide() end
@@ -250,7 +251,71 @@ local function HideAllBarElements(entry)
     if bw and bw._barIcon then bw._barIcon:Hide() end
 end
 
-local function UpdateBar(entry)
+local UpdateBar  -- forward declared; defined just below, used by the combat path
+
+-- Out-of-combat hiding for bars. Called from PT.RefreshCombatVisibility for
+-- every deck; returns immediately unless this bar opted in, so a bar with the
+-- option off keeps whatever visibility the existing gates gave it. Uses
+-- HideAllBarElements because the deck/proc text frames are NOT children of the
+-- bar frame and would otherwise stay on screen.
+-- ── Bar visibility: SINGLE AUTHORITY ─────────────────────────────────────────
+-- Visibility used to be decided in six unrelated places (Enable Bar toggle,
+-- talent gating, UpdateBar's own guard, the deck-update path, combat hiding,
+-- and BuildBarWidget), each calling Show/Hide directly. They could not see each
+-- other's reasons, so whoever ran last won and state got stuck -- a bar hidden
+-- by one path stayed hidden even once that reason went away.
+--
+-- Every input is now folded into ONE predicate, and every path routes through
+-- ApplyBarVisibility. Order of evaluation no longer matters.
+--
+-- Critically, showing the bar MUST be followed by UpdateBar: the deck/proc text
+-- frames are parented to UIParent, not to the bar, so they are only ever shown
+-- from inside UpdateBar -- and UpdateBar itself bails on a hidden bar. Show
+-- first, then redraw, or you get a bar with no text on it.
+local function BarShouldBeVisible(entry)
+    local db = BarDB(entry.id)
+    if not db.barEnabled then return false end
+    if entry.barTalentHidden then return false end
+    if db.barHideOOC and not (PT.ShouldShowOOC and PT.ShouldShowOOC()) then
+        return false
+    end
+    return true
+end
+
+function PT.ApplyBarVisibility(entry)
+    if not entry or not entry.barWidget then return end
+    if BarShouldBeVisible(entry) then
+        entry.barWidget:Show()
+        UpdateBar(entry)
+    else
+        HideAllBarElements(entry)
+    end
+end
+
+function PT.RefreshBarCombatVisibility(entry)
+    PT.ApplyBarVisibility(entry)
+end
+
+-- Fonts must apply even while the bar is HIDDEN. UpdateBar early-returns on a
+-- hidden frame ("if not bw:IsShown() then return end"), so a font picked out of
+-- combat, or with the bar temporarily hidden, would otherwise never land and
+-- would appear only on the next redraw. This path has no visibility gate.
+function PT.ApplyBarFonts(entry)
+    local bw = entry and entry.barWidget
+    if not bw then return end
+    local db = BarDB(entry.id)
+    local scale = db.barScale or 1.0
+    if bw._deckTextFrame and bw._deckTextFrame.text then
+        PT.SetFontSafe(bw._deckTextFrame.text, db.barDeckFont,
+            math.max(6, math.floor((db.barDeckTextSize or 14) * scale)))
+    end
+    if bw._procTextFrame and bw._procTextFrame.text then
+        PT.SetFontSafe(bw._procTextFrame.text, db.barProcFont,
+            math.max(6, math.floor((db.barProcTextSize or 14) * scale)))
+    end
+end
+
+function UpdateBar(entry)
     local bw = entry.barWidget
     if not bw then return end
     local db = BarDB(entry.id)
@@ -285,7 +350,7 @@ local function UpdateBar(entry)
     local curLevel  = db.barLevel or 5
     bw:SetFrameStrata(curStrata)
     bw:SetFrameLevel(curLevel)
-    -- text must sit above bar(+0) → ticks(+10) → border(+15) → icon(+20)
+    -- text must sit above bar(+0) â†’ ticks(+10) â†’ border(+15) â†’ icon(+20)
     local textLevel = curLevel + 30
     if bw._deckTextFrame then
         bw._deckTextFrame:SetFrameStrata(curStrata)
@@ -301,7 +366,7 @@ local function UpdateBar(entry)
     bar:SetMinMaxValues(0, deckSize)
     bar:SetValue(fillVal)
     bar:SetStatusBarColor(br, bg_, bb_, ba_)
-    -- Orientation: VERTICAL makes bar fill bottom→top (same as ArcUI bars)
+    -- Orientation: VERTICAL makes bar fill bottomâ†’top (same as ArcUI bars)
     bar:SetOrientation(vert and "VERTICAL" or "HORIZONTAL")
     -- ReverseFill: flips which end the bar fills from
     bar:SetReverseFill(db.barFillReverse == true)
@@ -320,7 +385,7 @@ local function UpdateBar(entry)
     -- Background
     bw._bg:SetVertexColor(db.barBgR, db.barBgG, db.barBgB, db.barBgA)
 
-    -- Border — 4 textures parented directly to bw (not StatusBar),
+    -- Border â€” 4 textures parented directly to bw (not StatusBar),
     -- so SetColorTexture is non-secret and renders correctly.
     local bf = bw._borderFrame
     if db.barBorderEnabled then
@@ -355,15 +420,15 @@ local function UpdateBar(entry)
     -- when the proc fired, accounting for countDown and reverseFill.
     --
     -- With countDown: bar starts full (fillVal=deckSize) and drains.
-    --   Proc at frac means fillVal was (1-frac)*deckSize → fill level = (1-frac).
+    --   Proc at frac means fillVal was (1-frac)*deckSize â†’ fill level = (1-frac).
     -- Without countDown: bar starts empty and fills.
-    --   Proc at frac means fillVal was frac*deckSize → fill level = frac.
+    --   Proc at frac means fillVal was frac*deckSize â†’ fill level = frac.
     -- barFillReverse flips which physical end is "full" (handled by SetReverseFill
     --   on the StatusBar), so we flip the visual position too.
     --
     -- Actual frame dims after vertical swap:
-    --   horizontal: frame is bW × bH
-    --   vertical:   frame is bH × bW (SetSize(bH,bW) was called above)
+    --   horizontal: frame is bW Ã— bH
+    --   vertical:   frame is bH Ã— bW (SetSize(bH,bW) was called above)
     local ticks     = bw._ticks
     local positions = procPositions[entry.id] or {}
     for i = 1, MAX_TICKS do ticks[i]:Hide() end
@@ -383,16 +448,16 @@ local function UpdateBar(entry)
             tick:ClearAllPoints()
             tick:SetColorTexture(tr,tg,tb,ta)
             if vert then
-                -- Vertical bar fills bottom→top (SetOrientation VERTICAL)
-                -- visualFrac=1 → top of bar, visualFrac=0 → bottom
+                -- Vertical bar fills bottomâ†’top (SetOrientation VERTICAL)
+                -- visualFrac=1 â†’ top of bar, visualFrac=0 â†’ bottom
                 local yOff = visualFrac * frameH
                 tick:SetPoint("BOTTOMLEFT",  bw, "BOTTOMLEFT",  0, yOff)
                 tick:SetPoint("BOTTOMRIGHT", bw, "BOTTOMRIGHT", 0, yOff)
                 tick:SetHeight(thick)
                 tick:SetWidth(0)  -- width driven by the two SetPoint anchors
             else
-                -- Horizontal bar fills left→right (SetOrientation HORIZONTAL)
-                -- visualFrac=0 → left edge, visualFrac=1 → right edge
+                -- Horizontal bar fills leftâ†’right (SetOrientation HORIZONTAL)
+                -- visualFrac=0 â†’ left edge, visualFrac=1 â†’ right edge
                 local xOff = visualFrac * frameW
                 tick:SetPoint("TOPLEFT",    bw, "TOPLEFT",    xOff, 0)
                 tick:SetPoint("BOTTOMLEFT", bw, "BOTTOMLEFT", xOff, 0)
@@ -407,9 +472,8 @@ local function UpdateBar(entry)
     local dtf = bw._deckTextFrame
     if db.barDeckTextEnabled then
         local pos  = db.barDeckCountDown and (deckSize-raw) or raw
-        local font = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
         local deckFontSize = math.max(6, math.floor((db.barDeckTextSize or 14) * (db.barScale or 1.0)))
-        dtf.text:SetFont(font, deckFontSize, "OUTLINE")
+        PT.SetFontSafe(dtf.text, db.barDeckFont, deckFontSize)
         dtf.text:SetShadowOffset(1,-1); dtf.text:SetShadowColor(0,0,0,1)
         local deckSuffix = db.barDeckShowSuffix and ("/"..tostring(deckSize)) or ""
         dtf.text:SetText(tostring(pos)..deckSuffix)
@@ -474,9 +538,8 @@ local function UpdateBar(entry)
     local ptf = bw._procTextFrame
     if db.barProcTextEnabled then
         local procDisp = db.barProcCountDown and (maxProcs-procs) or procs
-        local font = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
         local procFontSize = math.max(6, math.floor((db.barProcTextSize or 14) * (db.barScale or 1.0)))
-        ptf.text:SetFont(font, procFontSize, "OUTLINE")
+        PT.SetFontSafe(ptf.text, db.barProcFont, procFontSize)
         ptf.text:SetShadowOffset(1,-1); ptf.text:SetShadowColor(0,0,0,1)
         local procSuffix = db.barProcShowSuffix and ("/"..tostring(maxProcs)) or ""
         ptf.text:SetText(tostring(procDisp)..procSuffix)
@@ -496,7 +559,7 @@ local function UpdateBar(entry)
     end
 end
 
--- ── Widget builder ────────────────────────────────────────────────────────────
+-- â”€â”€ Widget builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function MakeDraggableTextFrame(frameName, id, xKey, yKey, anchorKey)
     local tf = CreateFrame("Frame", frameName, UIParent)
     tf:SetSize(80, 24)
@@ -598,7 +661,7 @@ local function BuildBarWidget(entry)
     f._ticks = ticks
 
     -- Border: 4 textures on a frame child of f (NOT parented to StatusBar)
-    -- This is critical — StatusBar children inherit taint in some cases.
+    -- This is critical â€” StatusBar children inherit taint in some cases.
     local borderFrame = CreateFrame("Frame", nil, f)
     borderFrame:SetAllPoints(f)
     borderFrame:SetFrameLevel(tickOverlay:GetFrameLevel()+5)
@@ -611,7 +674,7 @@ local function BuildBarWidget(entry)
     end
     f._borderFrame = bf
 
-    -- Icon frame (child of f, above tick overlay) — frame holds texture + border edges
+    -- Icon frame (child of f, above tick overlay) â€” frame holds texture + border edges
     local barIconFrame = CreateFrame("Frame", nil, f)
     barIconFrame:SetSize(db.barIconSize or 16, db.barIconSize or 16)
     barIconFrame:SetFrameLevel(borderFrame:GetFrameLevel() + 5)  -- icon above border
@@ -652,12 +715,13 @@ local function BuildBarWidget(entry)
 
     procPositions[id] = procPositions[id] or {}
     entry.barWidget = f
-    if db.barEnabled then f:Show() else f:Hide() end
-    UpdateBar(entry)
+    -- Route creation through the authority too, so a bar that should start
+    -- hidden (out of combat with the option on) never flashes visible at login.
+    PT.ApplyBarVisibility(entry)
     return f
 end
 
--- ── Proc position tracking ────────────────────────────────────────────────────
+-- â”€â”€ Proc position tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function CheckProcFired(entry)
     local id    = entry.id
     local procs = entry.GetProcs()
@@ -673,24 +737,19 @@ local function CheckProcFired(entry)
     lastProcCount[id] = procs
 end
 
--- ── Hook PT.UpdateDeck ────────────────────────────────────────────────────────
+-- â”€â”€ Hook PT.UpdateDeck â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local _origUpdateDeck = PT.UpdateDeck
 function PT.UpdateDeck(id)
     _origUpdateDeck(id)
     local entry = PT.GetDeck(id)
     if not entry then return end
     CheckProcFired(entry)
-    if entry.barWidget then
-        local db = BarDB(id)
-        if not db.barEnabled then
-            HideAllBarElements(entry)
-        else
-            UpdateBar(entry)
-        end
-    end
+    -- Through the authority, so every deck update also self-heals visibility
+    -- rather than only redrawing whatever state the bar happens to be in.
+    PT.ApplyBarVisibility(entry)
 end
 
--- ── Options ───────────────────────────────────────────────────────────────────
+-- â”€â”€ Options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local function BuildBarOptionsGroup(entry)
     local id = entry.id
     local function db() return BarDB(id) end
@@ -717,13 +776,17 @@ local function BuildBarOptionsGroup(entry)
             get=function() return db().barEnabled==true end,
             set=function(_,v)
                 db().barEnabled=v
-                if v then
-                    local bw=entry.barWidget
-                    if bw then bw:Show() end
-                    UpdateBar(entry)
-                else
-                    HideAllBarElements(entry)
-                end
+                PT.ApplyBarVisibility(entry)
+            end,
+        },
+        barHideOOC = {
+            type="toggle", name="Hide Out of Combat",
+            desc="Hide this bar whenever you are not in combat, and show it again when combat starts.",
+            order=o(), width=1.2, hidden=hidden,
+            get=function() return db().barHideOOC==true end,
+            set=function(_,v)
+                db().barHideOOC=v
+                PT.ApplyBarVisibility(entry)
             end,
         },
 
@@ -752,7 +815,7 @@ local function BuildBarOptionsGroup(entry)
                         registeredNames[e.id] = e.name
                     end)
                 end
-                -- Second pass: all saved bar data — includes decks from other specs
+                -- Second pass: all saved bar data â€” includes decks from other specs
                 -- that aren't currently registered (e.g. Enhancement bars on Elemental)
                 local db2 = ArcUI_ProcTrackerDB and ArcUI_ProcTrackerDB.bars or {}
                 for deckID, _ in pairs(db2) do
@@ -814,7 +877,7 @@ local function BuildBarOptionsGroup(entry)
         _spLayout1 = { type="description", name=" ", order=o(), width=0.1, hidden=function() return secHidden("layout") end },
         barRotateFill = {
             type="toggle", name="Rotate Fill",
-            desc="Rotates the bar texture pixels. Use alongside Vertical for aesthetic effect — does not change fill direction.",
+            desc="Rotates the bar texture pixels. Use alongside Vertical for aesthetic effect â€” does not change fill direction.",
             order=o(), width=0.9, hidden=function() return secHidden("layout") end,
             get=function() return db().barRotateFill==true end,
             set=function(_,v) db().barRotateFill=v; refresh() end,
@@ -1020,7 +1083,7 @@ local function BuildBarOptionsGroup(entry)
         },
         barFillSingle = {
             type="toggle", name="Single Fill Color",
-            desc="Use one fixed color for the bar fill instead of the per-state colors — the same idea as the texts' Fixed Color.",
+            desc="Use one fixed color for the bar fill instead of the per-state colors â€” the same idea as the texts' Fixed Color.",
             order=o(), width="full", hidden=function() return secHidden("fillColors") end,
             get=function() return db().barFillSingle==true end,
             set=function(_,v) db().barFillSingle=v; refresh() end,
@@ -1286,6 +1349,18 @@ local function BuildBarOptionsGroup(entry)
             get=function() return db().barDeckShowSuffix==true end,
             set=function(_,v) db().barDeckShowSuffix=v; refresh() end,
         },
+        barDeckFont = {
+            type="select", name="Font",
+            desc="Font for the deck position text. Includes fonts shared by other addons, such as ArcUI.",
+            order=o(), width=1.2,
+            dialogControl="LSM30_Font",
+            hidden=function()
+                return secHidden("deckText") or not db().barDeckTextEnabled or not PT.HasSharedMedia()
+            end,
+            values=function() return PT.FontValues() end,
+            get=function() return db().barDeckFont end,
+            set=function(_,v) db().barDeckFont=v; PT.ApplyBarFonts(entry); refresh() end,
+        },
         barDeckTextSize = {
             type="range", name="Font Size",
             min=8, max=32, step=1,
@@ -1393,6 +1468,18 @@ local function BuildBarOptionsGroup(entry)
             get=function() return db().barProcShowSuffix~=false end,
             set=function(_,v) db().barProcShowSuffix=v; refresh() end,
         },
+        barProcFont = {
+            type="select", name="Font",
+            desc="Font for the proc count text. Includes fonts shared by other addons, such as ArcUI.",
+            order=o(), width=1.2,
+            dialogControl="LSM30_Font",
+            hidden=function()
+                return secHidden("procText") or not db().barProcTextEnabled or not PT.HasSharedMedia()
+            end,
+            values=function() return PT.FontValues() end,
+            get=function() return db().barProcFont end,
+            set=function(_,v) db().barProcFont=v; PT.ApplyBarFonts(entry); refresh() end,
+        },
         barProcTextSize = {
             type="range", name="Font Size",
             min=8, max=32, step=1,
@@ -1465,7 +1552,7 @@ local function BuildBarOptionsGroup(entry)
     }
 end
 
--- ── Bootstrap ─────────────────────────────────────────────────────────────────
+-- â”€â”€ Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 do
     local _origRegister = PT.RegisterDeck
     function PT.RegisterDeck(def)
@@ -1499,18 +1586,14 @@ PT.UpdateBar = function(id)
 end
 
 -- Called by deck ApplyTalentVisibility to mirror talent gating on the bar.
--- talented=true  → show bar if barEnabled; run UpdateBar
--- talented=false → hide bar + text frames unconditionally
+-- talented=true  â†’ show bar if barEnabled; run UpdateBar
+-- talented=false â†’ hide bar + text frames unconditionally
 function PT.ApplyBarTalentVisibility(id, talented)
     local entry = PT.GetDeck(id)
     if not entry or not entry.barWidget then return end
-    if talented then
-        local db = BarDB(id)
-        if db.barEnabled then
-            entry.barWidget:Show()
-            UpdateBar(entry)
-        end
-    else
-        HideAllBarElements(entry)
-    end
+    -- Record the talent reason and let the single authority decide, so a bar
+    -- hidden for being untalented comes back on its own once talented again
+    -- without fighting the combat or Enable Bar reasons.
+    entry.barTalentHidden = not talented
+    PT.ApplyBarVisibility(entry)
 end

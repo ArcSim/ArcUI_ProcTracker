@@ -1,6 +1,8 @@
 # ArcUI ProcTracker — Changelog
 
-## 1.1.1
+## 1.1.2
+- **Hide Out of Combat** — New per-deck option for icons and bars to hide them until you enter combat.
+- **Font Selection** — Pick the font used by each deck's icon and bar text, including fonts shared by other addons like ArcUI.
 - **Doom Winds Deck Fix** — Fixed the Doom Winds deck counting extra procs.
 
 ## 1.1.0
