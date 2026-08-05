@@ -30,6 +30,15 @@ local dwGainCount      = 0
 local dwSnapTotal      = 0   -- pre-advance snapshot for THIS consume's proc check
 local dwLastAuraInstID = nil
 local dwAuraActive     = false  -- DW buff up? driven by CDM's own Set/Cleared calls
+local dwLastClearedAt  = 0      -- when CDM last cleared its aura slot (flap detection)
+-- A Set this soon after a Clear is CDM flapping, not a proc. The flap is a
+-- SAME-FRAME event: on 12.0.x any CooldownViewerSettings.OnDataChanged runs
+-- RefreshLayout -> itemFramePool:ReleaseAll() -> re-Acquire, so every item
+-- frame's aura slot is cleared and immediately re-set inside one rebuild.
+-- 12.1 added OnCooldownDataChanged, which updates in place when the frame count
+-- is unchanged and therefore never clears the slot -- so on 12.1 this guard
+-- simply never fires. 0.1s is one rebuild's worth of slack, nothing more.
+local FLAP_WINDOW      = 0.1
 local dwCDMFrame       = nil
 local dwProcThisConsume= false
 local dwLastProcTime   = 0
@@ -173,6 +182,21 @@ local function HookDWFrame(frame)
         if self ~= dwCDMFrame then return end
         local instID = self.auraInstanceID
         if not instID then return end
+        -- ONE rule, both branches: a Set arriving right after a Clear is CDM
+        -- flapping its own slot for an aura that never left, not a new proc.
+        -- Deliberately NOT an id comparison: the id is readable on live but
+        -- always <secret> on 12.1, so an id test can only ever work on one
+        -- branch and would leave the other unguarded. Timing works on both --
+        -- observed flaps re-set in the SAME frame as the clear, while a genuine
+        -- proc needs fresh MSW spends and cannot land this soon after the buff
+        -- actually ended.
+        if (GetTime() - dwLastClearedAt) <= FLAP_WINDOW then
+            -- Constant string on purpose: this fires on every CDM rebuild (many
+            -- per second on live), and building the message here would allocate
+            -- even with the debugger closed.
+            Attempt("CDM_SET", false, "CDM flap (re-set immediately after a clear)")
+            return
+        end
         dwAuraActive     = true
         dwLastAuraInstID = StorableAID(instID)
         GateGain("CDM_SET")
@@ -180,8 +204,12 @@ local function HookDWFrame(frame)
 
     hooksecurefunc(frame, "OnAuraInstanceInfoCleared", function(self)
         if self ~= dwCDMFrame then return end
-        dwAuraActive     = false
-        dwLastAuraInstID = nil
+        dwAuraActive    = false
+        dwLastClearedAt = GetTime()
+        -- Deliberately KEEP dwLastAuraInstID. A flap is Clear-then-Set of the
+        -- same instance, so wiping it here would blind the guard above and let
+        -- every flap through as a proc. A genuine proc always carries a NEW
+        -- instance id, so holding the old one can never block a real one.
     end)
 
     hooksecurefunc(frame, "OnUnitAuraAddedEvent", function(self)

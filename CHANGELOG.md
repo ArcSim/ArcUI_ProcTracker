@@ -1,5 +1,8 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.1.1
+- **Doom Winds Deck Fix** — Fixed the Doom Winds deck counting extra procs.
+
 ## 1.1.0
 - **New Options Look** — Brand-new Arc options window with tab navigation and a resizable panel. "Classic Options Panel" under General brings back the old one.
 - **Works With CDM Icons or Bars** — Deck tracking now hooks the cooldown wherever it lives in the Cooldown Manager: shown as an icon or as a bar, in any viewer.

@@ -43,6 +43,26 @@ local winStats       = nil
 local pendingCounted = 0     -- procs counted before the window officially opened
 local lastSource     = "?"   -- source tag of the most recent accepted attempt
 
+-- CDM FLAP HANDLING (live 12.0.x). CDM clears and re-sets its aura slot for an
+-- aura that never actually left -- observed twice in a single frame. A naive
+-- presence model treats each flap as a buff ending and a new one starting, which
+-- both invents windows and poisons the baseline with zero-length ones. When the
+-- instance id is READABLE we therefore key the window on the aura's IDENTITY:
+-- the same id coming back means the same buff, so we resume the window we just
+-- closed instead of opening a new one.
+local windowAuraID = nil   -- readable instance id this window belongs to
+local pendingClose = nil   -- { idx, s, endT, id } awaiting its deferred summary
+local flapCount    = 0
+
+local function ReadableAuraID()
+    local f = dwFrame
+    if not f then return nil end
+    local id = f.auraInstanceID
+    if id == nil then return nil end
+    if issecretvalue and issecretvalue(id) then return nil end
+    return id
+end
+
 -- Ground truth is the CDM frame's own aura slot, NOT GetPlayerAuraBySpellID:
 -- the tracked aura's spellID is not necessarily DW_BUFF_ID (it can be an
 -- override or a linked spell), and the by-spellID read came back nil for the
@@ -57,11 +77,21 @@ end
 -- back-to-back proc happened (the cooldown args are secret, so nothing numeric
 -- about the duration itself is readable).
 local baseWindowLen = nil
-local LEN_EPS       = 0.5
+local LEN_EPS       = 1.5   -- margin before calling a window re-timed
+
+-- DW refresh model, derived from four PTR windows and accurate to ~15ms:
+--   fresh application  -> 10.0s
+--   proc while active  -> min(remaining + 10.0, 12.0)   (pandemic, 20% overcap)
+-- The 12s ceiling is why DW never shows more than 12s no matter how many
+-- back-to-backs land. Predicting the end from the counted procs turns the
+-- window summary into an exact oracle: predict too EARLY and a refresh was
+-- missed, too LATE and one was invented.
+local DW_BASE_DUR = 10.0
+local DW_MAX_DUR  = 12.0
 
 local function NewStats()
     return { set=0, cleared=0, added=0, updated=0, pushes=0, pushFromRefresh=0,
-             refreshes=0, counted=0, extended=0, startT=GetTime() }
+             refreshes=0, counted=0, extended=0, startT=GetTime(), lastProcT=nil }
 end
 
 local function DumpWindowSummary(idx, s, endT)
@@ -71,8 +101,16 @@ local function DumpWindowSummary(idx, s, endT)
     -- and no refresh signal. Seeding from any window (as the first version did)
     -- lets a re-timed first window become the baseline and then fail its own
     -- comparison.
-    local clean = s.counted <= 1 and s.updated == 0
-    if clean and (not baseWindowLen or len < baseWindowLen) then
+    -- A window must be plausibly a real buff before it can define the baseline.
+    -- A CDM flap can produce a sub-second fragment, and adopting that as the
+    -- un-refreshed duration makes every later window read as RE-TIMED.
+    -- Take the LONGEST clean single-proc window as the un-refreshed duration.
+    -- Nothing can lengthen a single-proc window, but plenty can cut one short
+    -- (combat ending, the buff being overwritten, logging started mid-window),
+    -- so the minimum is the wrong statistic -- it latches onto a truncated
+    -- fragment and then every later window reads as RE-TIMED.
+    local clean = s.counted <= 1 and s.updated == 0 and len >= 1.0
+    if clean and (not baseWindowLen or len > baseWindowLen) then
         baseWindowLen = len
     end
     if not baseWindowLen then
@@ -107,6 +145,31 @@ local function DumpWindowSummary(idx, s, endT)
             s.counted, s.set, s.cleared, s.added, s.updated,
             s.refreshes, s.pushes, s.pushFromRefresh or 0, standalone),
         verdict)
+
+    -- The sharpest check available: a DW window's end is fully determined by its
+    -- LAST proc. Measured on PTR across three windows, a refresh puts the end at
+    -- refresh + 12.00s (within 7ms), and an un-refreshed window runs 10.00s. So
+    -- if this number is a consistent constant across windows, every refresh was
+    -- counted; an odd one out means a proc was missed (too long) or invented
+    -- (too short).
+    -- Exact check: does the observed end match what the counted procs predict?
+    if s.predEnd then
+        local err = endT - s.predEnd
+        local verdictTxt, col
+        if math.abs(err) <= 0.30 then
+            verdictTxt = "MATCHES — every proc in this window was counted"
+            col = "deck"
+        elseif err > 0 then
+            verdictTxt = string.format("buff outlived the prediction by %.2fs — a refresh was MISSED", err)
+            col = "violation"
+        else
+            verdictTxt = string.format("buff died %.2fs early — a proc was counted that did not happen", -err)
+            col = "violation"
+        end
+        Push("  ^ duration check", string.format(
+            "%d proc(s) predict end at +%.2fs, observed +%.2fs  |  %s",
+            s.counted, s.predEnd - s.startT, len, verdictTxt), col)
+    end
 
     if retimed then
         -- How much the refresh added. NOTE: do not read this as "end == last
@@ -375,10 +438,28 @@ local function CheckDWPresence()
     if present == dwPresent then return end
     dwPresent = present
     if present then
-        windowIdx = windowIdx + 1
+        -- Same aura identity returning right after a close = CDM flap, not a new
+        -- buff. Resume the window we just closed and cancel its summary.
+        local id = ReadableAuraID()
+        if id ~= nil and pendingClose ~= nil and pendingClose.id == id then
+            flapCount = flapCount + 1
+            Push("CDM FLAP #"..flapCount,
+                "aura "..tostring(id).." was cleared and re-set — SAME instance, the buff "
+                .."never left. Window #"..pendingClose.idx.." resumes; any proc counted off "
+                .."that Set is PHANTOM.", "violation")
+            winStats     = pendingClose.s
+            windowIdx    = pendingClose.idx
+            pendingClose = nil     -- cancels the deferred summary
+            return
+        end
+        windowIdx    = windowIdx + 1
+        windowAuraID = id
         winStats = NewStats()
         winStats.counted = pendingCounted
         pendingCounted = 0
+        -- The fresh proc that opened this window is counted before the window
+        -- exists (the Set hook fires first), so seed the prediction here.
+        winStats.predEnd = winStats.startT + DW_BASE_DUR
         local secret = (issecretvalue and issecretvalue(dwFrame.auraInstanceID)) and "SECRET" or "readable"
         Sep("DW WINDOW #"..windowIdx.." OPEN")
         Push("DW PRESENT (ground truth)",
@@ -390,12 +471,16 @@ local function CheckDWPresence()
         winStats    = nil
         chainBreak  = pushIdx   -- nothing after this compares to this window
         lastEndTime = nil
-        Push("DW ABSENT (ground truth)", "buff faded — window #"..idx.." closed", "dw_cast")
-        -- The final push's shadow finishes at the same instant the buff fades,
-        -- and classification defers 0.05s, so settle before summarising.
         local endT = GetTime()
+        -- Hold the close open briefly: if the SAME aura id comes straight back
+        -- it was a CDM flap and this window is not actually over.
+        pendingClose = { idx = idx, s = s, endT = endT, id = windowAuraID }
+        Push("DW ABSENT (ground truth)", "aura slot cleared (id="..tostring(windowAuraID)
+            ..") — window #"..idx.." closing, pending flap check", "dw_cast")
         C_Timer.After(0.3, function()
             if not enabled then return end
+            if not pendingClose or pendingClose.idx ~= idx then return end  -- flapped and resumed
+            pendingClose = nil
             DumpWindowSummary(idx, s, endT)
         end)
     end
@@ -639,7 +724,15 @@ local function WireDeckDebug()
         if accepted then
             lastSource = tostring(source)
             if winStats then
-                winStats.counted = winStats.counted + 1
+                local now = GetTime()
+                winStats.counted   = winStats.counted + 1
+                winStats.lastProcT = now
+                -- Advance the predicted end by the refresh model.
+                if winStats.predEnd then
+                    local remaining = winStats.predEnd - now
+                    if remaining < 0 then remaining = 0 end
+                    winStats.predEnd = now + math.min(remaining + DW_BASE_DUR, DW_MAX_DUR)
+                end
             else
                 pendingCounted = pendingCounted + 1
             end
@@ -709,13 +802,14 @@ dbgFrame:SetScript("OnEvent", function(_, event, a1, a2, a3, a4, a5)
         -- skips OnUnitAuraUpdatedEvent entirely -- so a buff refresh arriving in
         -- a full-update batch would be invisible to our back-to-back path. Log
         -- them while the window is open so a missed refresh can be pinned.
+        -- Only the cases that TELL us something. isFullUpdate reads <secret> on
+        -- every 12.1 batch, so logging that was pure noise; a nil payload or a
+        -- readable true still matter, because either means the viewer took the
+        -- RefreshLayout early-out and skipped every per-instance callback.
         if dwPresent then
-            local fu = info and info.isFullUpdate
             if not info then
                 Push("UNIT_AURA (window)", "no payload = FULL UPDATE — updated events SKIPPED", "warn")
-            elseif issecretvalue and issecretvalue(fu) then
-                Push("UNIT_AURA (window)", "isFullUpdate is SECRET — cannot tell", "warn")
-            elseif fu then
+            elseif not (issecretvalue and issecretvalue(info.isFullUpdate)) and info.isFullUpdate then
                 Push("UNIT_AURA (window)", "isFullUpdate=true — updated events SKIPPED this batch", "warn")
             end
         end
@@ -926,6 +1020,9 @@ local function Enable()
     chainBreak     = 0
     lastEndTime    = nil
     baseWindowLen  = nil
+    windowAuraID   = nil
+    pendingClose   = nil
+    flapCount      = 0
     lastSource     = "?"
     dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
     dbgFrame:RegisterEvent("UNIT_AURA")
