@@ -1,9 +1,32 @@
 -- ArcUI_PT_TempestDeck.lua
 -- Tempest (Enhancement) MSW deck tracking.
+--
 -- DETECTION RULE (single source of truth):
---   Tempest proc = new instID appears on CDM frame (cooldownID=82398)
---   within the same frame as MSW_CONSUMED, AND spender != Tempest cast (452201)
--- No polling. No COOLDOWN_VIEWER. No SPELL_UPDATE_COOLDOWN. No OnUnitAuraUpdatedEvent.
+--   Tempest proc = SPELL_UPDATE_COOLDOWN for the Tempest buff (454015) arriving
+--   within 5ms of MSW_CONSUMED. CDM is NOT part of counting -- cdm.instID is
+--   logging only. See noCDMWarn on the registration below.
+--
+-- WHAT 5ms ACTUALLY TESTS. Measured over 16 counted procs: EVERY one arrived at
+-- age=0.0ms, never 1ms or 3ms. GetTime() is frame-quantized, so 0.0 means "same
+-- client frame" and the next frame is ~16ms away at 60fps. The threshold
+-- therefore sits in dead space between frame 0 and frame 1 -- this is a
+-- same-frame identity test, not a tolerance on a noisy signal, which is why it
+-- does not drift. A rejected Awakening Storms gain measured 55ms (3 frames out).
+-- Do not "tune" this number: anything from ~1ms to ~10ms behaves identically,
+-- and going past ~16ms starts admitting the next frame.
+--
+-- WHY 5ms AND NOT WIDER. Tempest has a second source (Awakening Storms off
+-- Stormstrike/Windstrike) feeding the SAME buff, and 454015 fires on any change
+-- with no direction. Two things exploit a wider window:
+--   * an AWS proc landing near a spend, and
+--   * consuming Arc Discharge while Tempest is up, which REFRESHES the buff
+--     without granting a stack -- observed twice at +321ms and +334ms after a
+--     spend, both correctly rejected purely because they missed the 5ms cutoff.
+-- A marker hunt across 10 deck gains and 8 AWS gains found NO spell that
+-- separates the two sources; every AWS trail is Stormstrike side effects and
+-- every deck trail is spend side effects. So the tight window IS the
+-- discriminator -- do not widen it without a replacement.
+--
 -- No pcall. Zero polling.
 
 local issecretvalue = issecretvalue
@@ -56,9 +79,15 @@ local function AdvanceDeck(n)
         tempPrevDeckProcs = tempDeckProcs
         tempDeckProcs     = 0
         tempDeckNumber    = dAfter + 1
-        -- Defer violation check by one frame so same-frame SPELL_UPDATE_CD 454015
-        -- (rollover→prev credit) can arrive before we count a violation
-        C_Timer.After(0, function()
+        -- Defer the violation check past the RULE1 window, not merely by one
+        -- frame. A proc on the SAME spend that rolled the deck belongs to the
+        -- deck that just closed, and CreditProc back-credits it -- but RULE1
+        -- resolves on C_Timer.After(0.005), so an After(0) check here always
+        -- won the race and printed VIOLATION for a deck that was about to be
+        -- completed. It self-corrected (CreditProc decrements tempViolations),
+        -- yet the log line and the transient count were wrong, which makes the
+        -- violation counter untrustworthy as an alarm. Must stay > 0.005.
+        C_Timer.After(0.01, function()
             -- Only count as violation if UNDER the required procs (undercount)
             -- Overflow (>DECK_PROCS) means a late proc arrived and was redirected to new deck — not a violation
             local violation = tempPrevDeckProcs < DECK_PROCS
@@ -343,6 +372,13 @@ local function TryRegisterDeck()
         deckSize      = DECK_SIZE,
         procs         = DECK_PROCS,
         defaultIcon   = TEMPEST_CAST,
+        -- Counting does NOT use CDM. The rule is MSW_CONSUMED + SPELL_UPDATE_COOLDOWN
+        -- for 454015 in the same frame; cdm.instID feeds debug logging only, and
+        -- CreditProc is reached purely off spellCDFiredAt. Leaving the CDM warning
+        -- on meant the panel announced "detection disabled" whenever the frame
+        -- churned on a Lightning Bolt <-> Tempest override update, while detection
+        -- was in fact working the entire time.
+        noCDMWarn     = true,
         GetDeckPos    = GetDeckPos,
         GetProcs      = GetProcs,
         GetViolations = GetViolations,

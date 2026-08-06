@@ -2,7 +2,7 @@
 ## Title: ArcUI ProcTracker
 ## Notes: Deck proc tracking — DW, Tempest, DRE, and more. /pt for options.
 ## Author: Arc
-## Version: 1.1.2
+## Version: 1.1.3
 ## SavedVariables: ArcUI_ProcTrackerDB
 ## X-Curse-Project-ID: 1516247
 
@@ -22,10 +22,13 @@ ArcUI_PT_Core.lua
 ArcUI_PT_Bar.lua
 ArcUI_PT_MSW.lua
 ArcUI_PT_DWDeck.lua
+ArcUI_PT_StormUnleashedDeck.lua
 ArcUI_PT_TempestDeck.lua
 ArcUI_PT_ElemTempestDeck.lua
 ArcUI_PT_DREDeck.lua
 ArcUI_PT_TempestDebug.lua
 ArcUI_PT_ElemTempestDebug.lua
 ArcUI_PT_DWDebug.lua
+ArcUI_PT_SUDebug.lua
+ArcUI_PT_ResetLab.lua
 ArcUI_PT_DREDebug.lua

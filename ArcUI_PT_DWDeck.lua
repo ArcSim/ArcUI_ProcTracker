@@ -20,6 +20,40 @@ local ASC_IDS    = { [114051]=true, [114049]=true }
 local DECK_SIZE  = 600
 local DECK_PROCS = 3
 
+-- ── CDM-free detection: the wolf summon ───────────────────────────────────────
+-- Doom Winds has NO hidden proc-marker spell of its own (unlike Storm Unleashed,
+-- whose 1252413 is a hidden 3s dummy aura stamped at proc time). Measured over
+-- 3 procs / 35 non-proc spends:
+--     466772  "Doom Winds"        2/3 procs -- MISSES back-to-backs, unusable
+--     469270  "Doom Winds"        3/3 but also fires mid-uptime: it is the
+--                                 periodic DAMAGE effect, not a proc marker
+--     224127  "Crackling Surge"   3/3 procs, 0/35 non-procs
+--     148988  "Feral Spirit"      3/3 procs, 0/35 non-procs
+--
+-- Both talents below make Doom Winds summon a NATURE Feral Spirit, whose buff is
+-- Crackling Surge -- so a proc is detectable as "a Nature wolf just appeared".
+--
+-- 224127 is used rather than 148988 deliberately. 148988 is the generic hidden
+-- Feral Spirit dummy and will almost certainly fire for the FIRE wolf that the
+-- Feral Spirit talent summons from Sundering too; it only scored clean because
+-- no Sundering landed inside a sampled window. Crackling Surge is the Nature
+-- wolf's buff specifically (Fire grants Molten Weapon), so it cannot be
+-- confused with a Sundering summon.
+local WOLF_MARKER_ID = 224127   -- "Crackling Surge" -- Nature Feral Spirit buff
+local RT_NODE_ID     = 94889    -- Rolling Thunder  (DW summons a Nature wolf, 12s)
+local FS_NODE_ID     = 109194   -- Feral Spirit     (DW summons a Nature wolf, 8s)
+
+-- MEASURED, do not shrink. Wolf arrival across 5 counted procs (one full
+-- 600-card deck, rolled 3/3 clean):
+--     +85ms  +99ms  +100ms  +111ms  +138ms
+-- i.e. 5-9 frames late, with real spread. That is unlike the other two decks,
+-- whose signals are SAME-FRAME (Storm Unleashed's 1252413 and Tempest's 454015
+-- both arrive at 0.0ms), so the instinct to tighten this to ~50ms to match them
+-- is WRONG and would have missed every one of these. 250ms is ~1.8x the observed
+-- maximum -- adequate, but not generous. If a proc is ever missed, widen rather
+-- than hunt elsewhere, and re-measure the offsets first.
+local WOLF_WINDOW    = 0.25
+
 -- ── State ─────────────────────────────────────────────────────────────────────
 local dwTotalStacks    = 0
 local dwDeckNumber     = 1
@@ -38,6 +72,13 @@ local dwCDMFrame       = nil
 local dwProcThisConsume= false
 local dwLastProcTime   = 0
 local hardCastBuf      = {}  -- timestamps of hard-cast DW (suppress first proc)
+-- Wolf path. When wolfMode is true the CDM hooks stop counting entirely so the
+-- two paths can never both credit the same proc.
+local wolfMode         = false
+local wolfWatchUntil   = 0
+local wolfOpenedAt     = 0
+local wolfFired        = false
+local wolfFiredAt      = 0   -- for reporting how late the wolf actually lands
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 local function BufPush(buf)
@@ -153,6 +194,50 @@ local function GateGain(source)
     OnDWGain(source)
 end
 
+-- ── Wolf watcher (CDM-free path) ──────────────────────────────────────────────
+-- One persistent frame with an "is a window open" check: SPELL_UPDATE_COOLDOWN
+-- fires constantly, so the hot path is a single comparison and no frame churn.
+local wolfWatch = CreateFrame("Frame")
+wolfWatch:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+wolfWatch:SetScript("OnEvent", function(_, _, sid)
+    if GetTime() > wolfWatchUntil then return end
+    if wolfFired then return end
+    if issecretvalue and issecretvalue(sid) then return end
+    if tonumber(sid) ~= WOLF_MARKER_ID then return end
+    wolfFired   = true
+    wolfFiredAt = GetTime()
+end)
+
+-- Opened by an MSW spend, which is the only thing that rolls the deck. Three
+-- other ways a Nature wolf can appear are excluded:
+--   * Ascendance grants Doom Winds directly -- OnMSWConsumed never opens a
+--     window on an Ascendance spend, and GateGain rejects on IsAscActive()
+--     anyway in case Ascendance starts mid-window.
+--   * A hard-cast Doom Winds also summons one -- GateGain's hard-cast buffer.
+--   * Sundering summons a FIRE wolf, which grants Molten Weapon, not
+--     Crackling Surge -- excluded by the choice of marker.
+local function WolfWindowOpen()
+    if not wolfMode then return end
+    wolfFired      = false
+    wolfOpenedAt   = GetTime()
+    wolfWatchUntil = wolfOpenedAt + WOLF_WINDOW
+    C_Timer.After(WOLF_WINDOW, function()
+        local openedAt = wolfOpenedAt
+        wolfWatchUntil = 0
+        if not (dwEnabled and wolfMode) then return end
+        if wolfFired then
+            -- Offset is reported so WOLF_WINDOW can be tightened on evidence:
+            -- 250ms is only "what the hunt happened to capture with", not a
+            -- measurement. A consistently small offset means it can shrink,
+            -- which narrows the chance of an unrelated wolf landing inside.
+            GateGain(string.format("WOLF_224127 @+%dms",
+                math.floor((wolfFiredAt - openedAt) * 1000 + 0.5)))
+        else
+            Attempt("WOLF_224127", false, "no Nature wolf inside the spend window")
+        end
+    end)
+end
+
 local function HookDWFrame(frame)
     if frame._arcPTDWHooked then return end
     frame._arcPTDWHooked = true
@@ -204,6 +289,12 @@ local function HookDWFrame(frame)
         end
         dwAuraActive     = true
         dwLastAuraInstID = StorableAID(instID)
+        -- STATE ONLY while the wolf path owns counting, so the two can never
+        -- both credit the same proc.
+        if wolfMode then
+            Attempt("CDM_SET", false, "wolf path active -- CDM is state only")
+            return
+        end
         GateGain("CDM_SET")
     end)
 
@@ -250,6 +341,10 @@ local function HookDWFrame(frame)
         -- = back-to-back proc.
         local same = SameAuraID(instID, dwLastAuraInstID)
         if same == false then dwLastAuraInstID = StorableAID(instID) end
+        if wolfMode then
+            Attempt("CDM_UPDATED", false, "wolf path active -- CDM is state only")
+            return
+        end
         GateGain(same == nil and "CDM_UPD_SECRET" or "CDM_UPDATED")
     end)
 end
@@ -325,6 +420,7 @@ local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
     dwSnapTotal = dwTotalStacks
     AdvanceDeck(stacksSpent)
     dwProcThisConsume = false  -- reset per-consume proc guard
+    WolfWindowOpen()           -- no-op unless the wolf path owns counting
     PT.UpdateDeck("dw")
 end
 
@@ -339,6 +435,13 @@ PT.DW.IsCDMTracking = function()
     return dwCDMFrame.cooldownID == DW_CDM_ID
 end
 PT.DW.RehookCDM     = function() RehookDWCDMFrame() end
+-- Options panel hooks. CanSkipCDM reports whether a CDM-free path is AVAILABLE
+-- (talent present), independent of whether it is currently in use -- the panel
+-- needs the toggle visible even while the override is on, or there would be no
+-- way to turn it back off. Both are declared here but assigned after the talent
+-- helpers exist further down.
+PT.DW.CanSkipCDM    = nil
+PT.DW.SetForceCDM   = nil
 
 -- ── State accessors (used by Core icon widget) ─────────────────────────────────
 local function GetDeckPos()
@@ -367,6 +470,8 @@ local function Reset()
     dwProcThisConsume = false
     dwLastProcTime    = 0
     hardCastBuf       = {}
+    wolfFired         = false
+    wolfWatchUntil    = 0
     -- dwCDMFrame stays — no need to re-scan
     PT.UpdateDeck("dw")
 end
@@ -407,6 +512,43 @@ end)
 local ASC_NODE_ID  = 92219
 local ASC_ENTRY_ID = 114291  -- Ascendance specific entry
 
+-- User override: "Use CDM Detection Instead" in the options panel. Defaults to
+-- off, so a talented player gets the CDM-free path automatically; the toggle
+-- exists purely as an escape hatch if the wolf path ever misbehaves.
+local function ForceCDMSetting()
+    if not PT.GetIconDB then return false end
+    return PT.GetIconDB("dw").forceCDM == true
+end
+
+-- Either talent makes Doom Winds summon a Nature Feral Spirit, which is what the
+-- CDM-free path detects. Rolling Thunder is mandatory on the Stormbringer build,
+-- so that build never needs CDM at all. Single source of truth for both the
+-- gate and the name shown in the options panel.
+local WOLF_TALENTS = {
+    { node = RT_NODE_ID, name = "Rolling Thunder" },
+    { node = FS_NODE_ID, name = "Feral Spirit" },
+}
+
+-- Returns the display name of the talent providing the signal, or nil.
+local function ActiveWolfTalent()
+    local configID = C_ClassTalents and C_ClassTalents.GetActiveConfigID
+                     and C_ClassTalents.GetActiveConfigID()
+    if not configID then return nil end
+    if not (C_Traits and C_Traits.GetNodeInfo) then return nil end
+    for _, t in ipairs(WOLF_TALENTS) do
+        local ni = C_Traits.GetNodeInfo(configID, t.node)
+        if ni and (ni.activeRank or 0) > 0 then
+            -- Sub-tree nodes only count when their hero tree is the active one.
+            if ni.subTreeID == nil or ni.subTreeActive == true then return t.name end
+        end
+    end
+    return nil
+end
+
+local function HasWolfTalent()
+    return ActiveWolfTalent() ~= nil
+end
+
 local function IsDWTalented()
     local configID = C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID()
     if not configID then return false end
@@ -426,12 +568,16 @@ local function TryRegisterDeck()
         deckSize    = DECK_SIZE,
         procs       = DECK_PROCS,
         defaultIcon = DW_DEFAULT_ICON,
+        -- Seeded here so the CDM warning does not flash before the first
+        -- ApplyTalentVisibility; that call is the authority from then on.
+        noCDMWarn   = (HasWolfTalent() and not ForceCDMSetting()) or nil,
         GetDeckPos    = GetDeckPos,
         GetProcs      = GetProcs,
         GetViolations = GetViolations,
         OnReset     = Reset,
         OnEnable    = function()
             dwEnabled = true
+            wolfMode  = HasWolfTalent() and not ForceCDMSetting()
             -- Wire MSW consume callback
             PT.MSW.Subscribe("OnConsumed", OnMSWConsumed)
             -- Hook CDM frame
@@ -461,6 +607,24 @@ local function ApplyTalentVisibility()
         end
     end
     if PT.ApplyBarTalentVisibility then PT.ApplyBarTalentVisibility("dw", talented) end
+
+    -- Pick the detection path. Wolf first: it needs no CDM frame and, unlike the
+    -- DW buff, it catches back-to-backs. Without either talent there is no wolf,
+    -- so fall back to CDM and let the panel ask for it again -- Core reads
+    -- entry.noCDMWarn live, so flipping it here drives the warning overlay.
+    local wantWolf = talented and HasWolfTalent() and not ForceCDMSetting()
+    if wantWolf ~= wolfMode then
+        wolfMode = wantWolf
+        Attempt("MODE", false, wolfMode
+            and "wolf path active (talent found) -- CDM not required"
+            or  "wolf talent missing -- falling back to CDM detection")
+    end
+    entry.noCDMWarn = wolfMode or nil
+    if not wolfMode then
+        -- CDM is doing the counting again, so make sure we are actually bound.
+        InstallSetCooldownIDHook()
+        RehookDWCDMFrame()
+    end
     -- Pause MSW tracking when untalented
     if not talented then
         dwEnabled = false
@@ -472,6 +636,11 @@ local function ApplyTalentVisibility()
         PT.MSW.InitFromLive()
     end
 end
+
+PT.DW.CanSkipCDM  = function() return HasWolfTalent() end
+-- Optional: names the talent supplying the signal, for the options panel.
+PT.DW.SkipCDMReason = function() return ActiveWolfTalent() end
+PT.DW.SetForceCDM = function() ApplyTalentVisibility() end
 
 -- Re-check on any talent/loadout change
 local dwTalentFrame = CreateFrame("Frame")

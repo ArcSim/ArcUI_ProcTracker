@@ -1,4 +1,4 @@
-﻿-- ArcUI_PT_Core.lua
+-- ArcUI_PT_Core.lua
 -- ProcTracker: icon widget factory, per-deck options panel, /pt slash command.
 -- No detection logic here. Decks register via PT.RegisterDeck().
 -- No pcall. Zero polling.
@@ -9,13 +9,13 @@ local InitMinimapButton  -- forward declare
 local BuildOptionsPanel   -- forward declare
 local LDB, LDBIcon        -- forward declare (real assignment near minimap section)
 
--- â”€â”€ Registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Registry ──────────────────────────────────────────────────────────────────
 -- Each entry: { id, name, deckSize, procs, defaultIcon, widget, optPanel,
 --               GetDeckPos, GetProcs, OnReset, OnEnable, OnDisable }
 local registry  = {}   -- ordered list
-local registryMap = {} -- id â†’ entry
+local registryMap = {} -- id → entry
 
--- â”€â”€ SavedVariables helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── SavedVariables helpers ────────────────────────────────────────────────────
 local DB_NAME = "ArcUI_ProcTrackerDB"
 
 local function GetDB()
@@ -45,7 +45,7 @@ local ICON_DEFAULTS = {
     -- otherwise a LibSharedMedia font name.
 }
 
--- â”€â”€ Shared media â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Shared media ──────────────────────────────────────────────────────────────
 -- LibSharedMedia is a single shared registry, so the font list here automatically
 -- includes anything other addons have registered -- ArcUI's fonts show up without
 -- ProcTracker needing to know ArcUI exists.
@@ -125,7 +125,11 @@ local function IconDB(id)
     return t
 end
 
--- â”€â”€ Border helpers (same method as CDMEnhance) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- Decks need their own saved settings (e.g. the DW "force CDM" override) before
+-- the options panel has ever been opened, so expose the accessor.
+PT.GetIconDB = IconDB
+
+-- ── Border helpers (same method as CDMEnhance) ───────────────────────────────
 local function GetClassColor()
     local _, class = UnitClass("player")
     local c = RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
@@ -183,13 +187,13 @@ local function UpdateBorder(frame, db, anchor)
     edges.right:SetWidth(thickness); edges.right:SetVertexColor(r,g,b,a); edges.right:Show()
 end
 
--- â”€â”€ AceConfig locals (declared early for widget helpers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── AceConfig locals (declared early for widget helpers) ─────────────────────
 local AceConfig         = LibStub("AceConfig-3.0", true)
 local AceConfigDialog   = LibStub("AceConfigDialog-3.0", true)
 local AceConfigRegistry = LibStub("AceConfigRegistry-3.0", true)
 local PT_OPTIONS_NAME   = "ArcUI_ProcTracker_Options"
 
--- â”€â”€ Widget helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Widget helpers ────────────────────────────────────────────────────────────
 local function ProcColor(db, procs, maxProcs)
     if db.procCountDown then
         local rem = maxProcs - procs
@@ -285,7 +289,7 @@ local function UpdateIcon(entry)
     w._procText:ClearAllPoints()
     w._procText:SetPoint("CENTER", w._icon, "CENTER", db.procOffX, db.procOffY)
 
-    -- Border â€” hidden in text-only mode, otherwise applied to icon texture
+    -- Border — hidden in text-only mode, otherwise applied to icon texture
     if textOnly then
         if w._arcPTBorderEdges then
             for _, t in pairs(w._arcPTBorderEdges) do t:Hide() end
@@ -305,14 +309,14 @@ local function ApplyIconSize(f, w, h)
     if f._icon then f._icon:SetSize(w, h) end
 end
 
--- â”€â”€ Text drag handles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Text drag handles ────────────────────────────────────────────────────────
 -- Creates an invisible mouse-enabled frame on top of a FontString.
 -- When "unlock texts" is on, dragging the handle updates the offset DB keys
 -- (offXKey/offYKey relative to the icon's CENTER) and refreshes the icon.
 -- onRefresh() is called after drag stop so the options panel updates.
 local function MakeTextDragHandle(parent, fontString, anchorTo, getDB, offXKey, offYKey, onRefresh)
     -- Manual drag with OnMouseDown/OnMouseUp (NOT RegisterForDrag) so motion
-    -- starts the instant the button is pressed â€” no WoW drag threshold.
+    -- starts the instant the button is pressed — no WoW drag threshold.
 
     local h = CreateFrame("Frame", nil, parent)
     h:SetFrameStrata(parent:GetFrameStrata())
@@ -414,7 +418,7 @@ local function ApplyTextDragHandleState(entry, unlocked)
     end
 end
 
--- â”€â”€ Widget helpers (continued) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Widget helpers (continued) ───────────────────────────────────────────────
 
 local function BuildIconWidget(entry)
     local db    = IconDB(entry.id)
@@ -449,7 +453,7 @@ local function BuildIconWidget(entry)
     f:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         -- Save the FULL anchor description, not just offsets. SetClampedToScreen
-        -- can change the anchor type during drag (e.g. CENTER â†’ BOTTOMLEFT) so
+        -- can change the anchor type during drag (e.g. CENTER → BOTTOMLEFT) so
         -- saving only x/y and re-applying as CENTER/CENTER puts the icon at a
         -- different screen position on reload.
         local point, _, relPoint, x, y = self:GetPoint()
@@ -504,7 +508,7 @@ local function BuildIconWidget(entry)
         function() return IconDB(id) end, "violOffX", "violOffY",
         function() UpdateIcon(entry) end)
 
-    -- CDM tracking warning overlay â€” yellow tint + ! text when CDM frame not hooked
+    -- CDM tracking warning overlay — yellow tint + ! text when CDM frame not hooked
     local cdmWarn = f:CreateTexture(nil, "OVERLAY")
     cdmWarn:SetAllPoints(icon)
     cdmWarn:SetColorTexture(1, 0.85, 0, 0.25)
@@ -521,7 +525,7 @@ local function BuildIconWidget(entry)
     f._cdmWarnText = cdmWarnText
 
     entry.widget = f
-    -- Respect saved deckEnabled state â€” don't show if user disabled the icon
+    -- Respect saved deckEnabled state — don't show if user disabled the icon
     local idb = IconDB(entry.id)
     if idb.deckEnabled == false then
         f:Hide()
@@ -545,7 +549,7 @@ local function BuildIconWidget(entry)
             -- (deckEnabled hide should not affect bar)
             local idb2 = IconDB(entry.id)
             if idb2.deckEnabled ~= false then
-                -- This is a talent-driven hide â€” also hide bar
+                -- This is a talent-driven hide — also hide bar
                 if entry.barWidget then entry.barWidget:Hide() end
                 if entry.barWidget and entry.barWidget._deckTextFrame then entry.barWidget._deckTextFrame:Hide() end
                 if entry.barWidget and entry.barWidget._procTextFrame then entry.barWidget._procTextFrame:Hide() end
@@ -556,15 +560,21 @@ local function BuildIconWidget(entry)
     return f
 end
 
--- â”€â”€ AceConfig options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── AceConfig options ────────────────────────────────────────────────────────
 local collapsedSections = {}  -- session-only collapse state per deck
 
 GetDeckNS = function(id)
     -- Map deck id to its namespace table on PT
-    if id == "dw"           then return PT.DW end
-    if id == "tempest"      then return PT.Tempest end
-    if id == "elemtempest"  then return PT.ElemTempest end
-    return nil
+    if id == "dw"             then return PT.DW end
+    if id == "stormunleashed" then return PT.StormUnleashed end
+    if id == "tempest"        then return PT.Tempest end
+    if id == "elemtempest"    then return PT.ElemTempest end
+    -- Fallback: a deck can hand its namespace to RegisterDeck. Without this, a
+    -- new deck that is missed above silently loses ALL CDM tracking -- not just
+    -- the status text, but InvalidateAllCDMFrames and SchedulePTCDMRehook too,
+    -- so it would never re-hook after a CDM rebuild.
+    local entry = registryMap[id]
+    return entry and entry.ns or nil
 end
 
 local function BuildDeckOptionsGroup(entry)
@@ -585,8 +595,8 @@ local function BuildDeckOptionsGroup(entry)
         name = entry.name,
         args = {
 
-            -- â”€â”€ WIDGET (master toggle lives WITH the icon options; the header
-            -- is never hidden so a disabled deck can be re-enabled) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            -- ── WIDGET (master toggle lives WITH the icon options; the header
+            -- is never hidden so a disabled deck can be re-enabled) ───────────
             iconHeader = {
                 type = "header", name = "Widget", order = o(),
             },
@@ -674,50 +684,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- â”€â”€ CDM TRACKING (rides in the Widget tab) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            cdmHeader = {
-                type = "header", name = "CDM Tracking", order = o(),
-                hidden = function() return iconHidden() or entry.noCDMWarn end,
-            },
-            cdmStatus = {
-                type = "description",
-                name = function()
-                    local ns = GetDeckNS(entry.id)
-                    local ok = ns and ns.IsCDMTracking and ns.IsCDMTracking()
-                    if ok then
-                        return "|cff44FF44CDM frame hooked â€” tracking active|r"
-                    else
-                        return "|cffFF4444CDM frame NOT found â€” detection disabled|r"
-                    end
-                end,
-                order = o(), width = "full",
-                hidden = function() return iconHidden() or entry.noCDMWarn end,
-            },
-            cdmReverify = {
-                type = "execute", name = "Reverify CDM Tracking",
-                desc = "Scans CDM viewers and re-hooks the tracking frame. Use this if tracking failed on login.",
-                order = o(), width = "full",
-                hidden = function() return iconHidden() or entry.noCDMWarn end,
-                func = function()
-                    local ns = GetDeckNS(entry.id)
-                    if ns and ns.RehookCDM then
-                        ns.RehookCDM()
-                        C_Timer.After(0.1, function()
-                            UpdateIcon(entry)
-                            -- refresh whichever panel is showing (Arc 2.0 or classic)
-                            local skin = LibStub and LibStub("ArcSkin-1.0", true)
-                            local sw = skin and skin:GetOptionsWindow(PT_OPTIONS_NAME)
-                            if sw and sw.frame:IsShown() then
-                                skin:Refresh(PT_OPTIONS_NAME)
-                            else
-                                AceConfigDialog:Open(PT_OPTIONS_NAME)
-                            end
-                        end)
-                    end
-                end,
-            },
-
-            -- â”€â”€ POSITION & SIZE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            -- ── POSITION & SIZE ───────────────────────────────────────────────
             posHeader = {
                 type = "header", name = "Position & Size", order = o(),
                 hidden = iconHidden,
@@ -779,7 +746,7 @@ local function BuildDeckOptionsGroup(entry)
             },
             iconScale = {
                 type = "range", name = "Scale",
-                desc = "Scales the entire icon widget uniformly â€” multiplies all sizes",
+                desc = "Scales the entire icon widget uniformly — multiplies all sizes",
                 min = 0.5, max = 3.0, step = 0.05,
                 order = o(), width = "full",
                 hidden = iconHidden,
@@ -891,7 +858,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- â”€â”€ DECK POSITION TEXT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            -- ── DECK POSITION TEXT ────────────────────────────────────────────
             deckTextHeader = {
                 type = "header", name = "Deck Position Text", order = o(),
                 hidden = iconHidden,
@@ -976,7 +943,7 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- â”€â”€ PROC COUNT TEXT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            -- ── PROC COUNT TEXT ───────────────────────────────────────────────
             procTextHeader = {
                 type = "header", name = "Proc Count", order = o(),
                 hidden = iconHidden,
@@ -1084,8 +1051,8 @@ local function BuildDeckOptionsGroup(entry)
                 end,
             },
 
-            -- â”€â”€ VIOLATIONS (lives in the Proc Count section: no own header;
-            -- the violation counter is a proc-count companion) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            -- ── VIOLATIONS (lives in the Proc Count section: no own header;
+            -- the violation counter is a proc-count companion) ────────────────
             showViolations = {
                 type  = "toggle", name = "Show Violation Counter",
                 desc  = "Shows a count of decks that had wrong proc count. Disabled by default.",
@@ -1202,7 +1169,7 @@ local function BuildDeckOptionsGroup(entry)
                     if w and w._violTextHandle and w._violTextHandle._resync then w._violTextHandle._resync() end
                 end,
             },
-            -- â”€â”€ BORDER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            -- ── BORDER ────────────────────────────────────────────────────────
             borderHeader = {
                 type = "header", name = "Border", order = o(),
                 hidden = iconHidden,
@@ -1256,7 +1223,7 @@ local function BuildMasterOptionsTable()
     local args = {}
     local order = 1
 
-    -- â”€â”€ General tab (appears last) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    -- ── General tab (appears last) ───────────────────────────────────────────
     args.general = {
         type        = "group",
         name        = "General",
@@ -1333,14 +1300,16 @@ local function BuildMasterOptionsTable()
             }
         end
 
-        -- Reset works on BOTH the icon and the bar -> its own tab at the
-        -- same level as Icon / Bar (Arc's call)
-        local resetGroup = {
-            type = "group", name = "Reset", order = 3,
+        -- Behavior: everything that affects the DECK itself rather than one of
+        -- its displays. Reset and the detection method both apply to the Icon
+        -- and the Bar equally, so neither belongs inside the Widget tab -- and
+        -- nothing in here is gated on the icon being enabled.
+        local behaviorGroup = {
+            type = "group", name = "Behavior", order = 3,
             args = {
                 resetDesc = {
                     type = "description", order = 1, width = "full",
-                    name = "Resets this deck's tracking â€” deck position and proc count back to zero. Applies to both the Icon widget and the Bar.",
+                    name = "Resets this deck's tracking — deck position and proc count back to zero. Applies to both the Icon widget and the Bar.",
                 },
                 resetDeck = {
                     type  = "execute", name = "Reset Deck Tracking",
@@ -1349,6 +1318,92 @@ local function BuildMasterOptionsTable()
                     func  = function()
                         if entry.OnReset then entry.OnReset() end
                         UpdateIcon(entry)
+                    end,
+                },
+
+                -- ── DETECTION METHOD ─────────────────────────────────────────
+                -- Switches what runs under the hood. Nothing here touches the
+                -- user's layout: the icon, the bar and their positions are
+                -- untouched, only the source the deck counts from changes.
+                cdmHeader = {
+                    type = "header", name = "Detection Method", order = 10,
+                    hidden = function()
+                        local ns = GetDeckNS(entry.id)
+                        if ns and ns.CanSkipCDM and ns.CanSkipCDM() then return false end
+                        return entry.noCDMWarn
+                    end,
+                },
+                cdmFreeStatus = {
+                    type = "description", order = 11, width = "full",
+                    -- Name the talent when the deck can tell us which one it is.
+                    -- "your talents" leaves the user guessing which to keep.
+                    name = function()
+                        local ns  = GetDeckNS(entry.id)
+                        local why = ns and ns.SkipCDMReason and ns.SkipCDMReason()
+                        if why then
+                            return "|cff44FF44Cooldown Manager not needed — |r|cffFFD000"
+                                ..why.."|r|cff44FF44 provides the tracking signal.|r"
+                        end
+                        return "|cff44FF44Cooldown Manager not needed — your talents provide "
+                            .."the tracking signal.|r"
+                    end,
+                    hidden = function()
+                        local ns = GetDeckNS(entry.id)
+                        return not (ns and ns.CanSkipCDM and ns.CanSkipCDM())
+                            or IconDB(entry.id).forceCDM == true
+                    end,
+                },
+                forceCDM = {
+                    type = "toggle", name = "Use CDM Detection Instead",
+                    desc = "Your talents let this deck track procs without CDM. Turn this on "
+                        .."to fall back to the CDM method if the talent-based tracking ever "
+                        .."misbehaves. Lose the talent and the deck falls back on its own.",
+                    order = 12, width = "full",
+                    hidden = function()
+                        local ns = GetDeckNS(entry.id)
+                        return not (ns and ns.CanSkipCDM and ns.CanSkipCDM())
+                    end,
+                    get = function() return IconDB(entry.id).forceCDM == true end,
+                    set = function(_, v)
+                        IconDB(entry.id).forceCDM = v
+                        local ns = GetDeckNS(entry.id)
+                        if ns and ns.SetForceCDM then ns.SetForceCDM(v) end
+                        UpdateIcon(entry)
+                    end,
+                },
+                cdmStatus = {
+                    type = "description", order = 13, width = "full",
+                    name = function()
+                        local ns = GetDeckNS(entry.id)
+                        local ok = ns and ns.IsCDMTracking and ns.IsCDMTracking()
+                        if ok then
+                            return "|cff44FF44CDM frame hooked — tracking active|r"
+                        else
+                            return "|cffFF4444CDM frame NOT found — detection disabled|r"
+                        end
+                    end,
+                    hidden = function() return entry.noCDMWarn end,
+                },
+                cdmReverify = {
+                    type = "execute", name = "Reverify CDM Tracking",
+                    desc = "Scans CDM viewers and re-hooks the tracking frame. Use this if tracking failed on login.",
+                    order = 14, width = "full",
+                    hidden = function() return entry.noCDMWarn end,
+                    func = function()
+                        local ns = GetDeckNS(entry.id)
+                        if ns and ns.RehookCDM then
+                            ns.RehookCDM()
+                            C_Timer.After(0.1, function()
+                                UpdateIcon(entry)
+                                local skin = LibStub and LibStub("ArcSkin-1.0", true)
+                                local sw = skin and skin:GetOptionsWindow(PT_OPTIONS_NAME)
+                                if sw and sw.frame:IsShown() then
+                                    skin:Refresh(PT_OPTIONS_NAME)
+                                else
+                                    AceConfigDialog:Open(PT_OPTIONS_NAME)
+                                end
+                            end)
+                        end
                     end,
                 },
             },
@@ -1371,7 +1426,7 @@ local function BuildMasterOptionsTable()
                         }
                     }
                 },
-                reset = resetGroup,
+                reset = behaviorGroup,
             },
         }
         args[entry.id] = deckTab
@@ -1483,9 +1538,9 @@ BuildOptionsPanel = function(entry)
         end)
     end
 end
--- â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Public API ────────────────────────────────────────────────────────────────
 -- Deck modules subscribe here to retry registration on PLAYER_ENTERING_WORLD
-PT.OnEnterWorld = {}  -- array of functions â€” deck modules subscribe to retry registration
+PT.OnEnterWorld = {}  -- array of functions — deck modules subscribe to retry registration
 
 -- PT.RegisterDeck(def)
 -- def = {
@@ -1506,7 +1561,7 @@ function PT.RegisterDeck(def)
     assert(def.procs,       "PT.RegisterDeck: missing procs")
     assert(def.GetDeckPos,  "PT.RegisterDeck: missing GetDeckPos")
     assert(def.GetProcs,    "PT.RegisterDeck: missing GetProcs")
-    -- Idempotent â€” ignore if already registered with this id
+    -- Idempotent — ignore if already registered with this id
     if registryMap[def.id] then return end
     def.defaultIcon = def.defaultIcon or 136048
     def.widget   = nil
@@ -1537,7 +1592,7 @@ function PT.ForEachDeck(fn)
     for _, entry in ipairs(registry) do fn(entry) end
 end
 
--- â”€â”€ Out-of-combat hiding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Out-of-combat hiding ─────────────────────────────────────────────────────
 -- Opt-in per deck. This is layered ON TOP of the existing gates rather than
 -- replacing them: a widget shows only if the user enabled it AND (it is not set
 -- to hide out of combat OR we are in combat). Talent visibility still owns
@@ -1587,7 +1642,7 @@ function PT.CombatAllowsShow(idb)
     return CombatAllowsIcon(idb)
 end
 
--- Safe show for talent-driven visibility â€” respects user's deckEnabled setting.
+-- Safe show for talent-driven visibility — respects user's deckEnabled setting.
 -- Deck modules call this instead of entry.widget:Show() directly.
 function PT.ShowDeckIconIfEnabled(id)
     local entry = registryMap[id]
@@ -1636,7 +1691,7 @@ combatWatch:RegisterEvent("PLAYER_REGEN_ENABLED")
 combatWatch:RegisterEvent("PLAYER_ENTERING_WORLD")
 combatWatch:SetScript("OnEvent", function() PT.RefreshCombatVisibility() end)
 
--- â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Lifecycle ─────────────────────────────────────────────────────────────────
 local watchFrame = CreateFrame("Frame")
 watchFrame:RegisterEvent("ADDON_LOADED")
 watchFrame:RegisterEvent("PLAYER_LOGIN")
@@ -1646,10 +1701,20 @@ watchFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
     if event == "ADDON_LOADED" and a1 == "ArcUI_ProcTracker" then
         ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
-        -- Build icons for all registered decks
+        -- Build icons for all registered decks.
+        -- The `not entry.widget` guard is REQUIRED, not defensive. SavedVariables
+        -- are populated before ADDON_LOADED fires, so a deck file that manages to
+        -- register at load time (talent APIs happened to be ready) hits the
+        -- "ArcUI_ProcTrackerDB already exists" branch in RegisterDeck and builds
+        -- its widget there. Without this check we would build a SECOND one here.
+        -- BuildIconWidget names its frame ArcUI_PT_Icon_<id>, so the duplicate
+        -- overwrites the global and the first frame is orphaned on screen --
+        -- visible, never updated, never hidden. That is the two-icons bug.
         for _, entry in ipairs(registry) do
-            BuildIconWidget(entry)
-            if entry.OnEnable then entry.OnEnable() end
+            if not entry.widget then
+                BuildIconWidget(entry)
+                if entry.OnEnable then entry.OnEnable() end
+            end
         end
         InitMinimapButton()
         -- (login chat message removed -- Arc's call: minimal chat output;
@@ -1679,7 +1744,7 @@ watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
         -- (C_ClassTalents is not ready at ADDON_LOADED on fresh login)
         for _, fn in ipairs(PT.OnEnterWorld) do fn() end
         for _, entry in ipairs(registry) do
-            -- Only reset on fresh login â€” NOT on reload or zone transition
+            -- Only reset on fresh login — NOT on reload or zone transition
             if isLogin and not isReload then
                 if entry.OnReset then entry.OnReset() end
             end
@@ -1690,12 +1755,12 @@ watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
 
 end)
 
--- â”€â”€ CDM change detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── CDM change detection ────────────────────────────────────────────────────
 -- RefreshLayout calls itemFramePool:ReleaseAll() silently (no ClearCooldownID),
 -- then acquires new frames and calls SetCooldownID. So hooking ClearCooldownID
 -- never fires on remove. The correct signal is:
---   1. CooldownViewerSettings.OnDataChanged  â€” fires when user adds/removes in CDM UI
---   2. hooksecurefunc CooldownViewerMixin.OnAcquireItemFrame â€” fires after ReleaseAll
+--   1. CooldownViewerSettings.OnDataChanged  — fires when user adds/removes in CDM UI
+--   2. hooksecurefunc CooldownViewerMixin.OnAcquireItemFrame — fires after ReleaseAll
 --      for each new frame, letting us invalidate stale refs and rehook
 -- Both paths funnel into SchedulePTCDMRehook which nils stale frames + rehooks.
 local _ptCDMRehookPending = false
@@ -1716,7 +1781,7 @@ local function SchedulePTCDMRehook()
     if _ptCDMRehookPending then return end
     _ptCDMRehookPending = true
     -- Rehook immediately so the frame ref is restored ASAP.
-    -- Do NOT update the overlay yet â€” CDM reassigns within milliseconds in combat.
+    -- Do NOT update the overlay yet — CDM reassigns within milliseconds in combat.
     -- Only show ! if the frame is STILL missing after 1s.
     for _, entry in ipairs(registry) do
         if not entry.noCDMWarn then
@@ -1740,30 +1805,30 @@ local function SchedulePTCDMRehook()
 end
 
 local function InstallCDMMixinHooks()
-    -- Hook SetCooldownID on the mixin â€” fires during RefreshData after ReleaseAll
+    -- Hook SetCooldownID on the mixin — fires during RefreshData after ReleaseAll
     if CooldownViewerItemDataMixin and CooldownViewerItemDataMixin.SetCooldownID then
         if not CooldownViewerItemDataMixin._arcPTCDMSetHooked then
             CooldownViewerItemDataMixin._arcPTCDMSetHooked = true
             hooksecurefunc(CooldownViewerItemDataMixin, "SetCooldownID", function(self, cooldownID)
-                -- Fires for EVERY frame after a reshuffle â€” just schedule rehook
+                -- Fires for EVERY frame after a reshuffle — just schedule rehook
                 SchedulePTCDMRehook()
             end)
         end
     end
-    -- Hook OnAcquireItemFrame on CooldownViewerMixin â€” fires right after ReleaseAll
+    -- Hook OnAcquireItemFrame on CooldownViewerMixin — fires right after ReleaseAll
     -- for each new frame. This is our earliest signal that a reshuffle happened.
     if CooldownViewerMixin and CooldownViewerMixin.OnAcquireItemFrame then
         if not CooldownViewerMixin._arcPTAcquireHooked then
             CooldownViewerMixin._arcPTAcquireHooked = true
             hooksecurefunc(CooldownViewerMixin, "OnAcquireItemFrame", function()
-                -- ReleaseAll just happened â€” all our cached frame refs are now stale
+                -- ReleaseAll just happened — all our cached frame refs are now stale
                 InvalidateAllCDMFrames()
                 SchedulePTCDMRehook()
             end)
         end
     end
     -- EventRegistry: CooldownViewerSettings.OnDataChanged fires when user
-    -- adds/removes/reorders in CDM settings panel â€” earliest possible signal
+    -- adds/removes/reorders in CDM settings panel — earliest possible signal
     if EventRegistry and EventRegistry.RegisterCallback then
         EventRegistry:RegisterCallback("CooldownViewerSettings.OnDataChanged", function()
             InvalidateAllCDMFrames()
@@ -1773,9 +1838,9 @@ local function InstallCDMMixinHooks()
 end
 InstallCDMMixinHooks()
 
--- â”€â”€ Slash command â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
--- â”€â”€ Combat reset events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
--- All decks share the same reset conditions â€” managed centrally here.
+-- ── Slash command ─────────────────────────────────────────────────────────────
+-- ── Combat reset events ─────────────────────────────────────────────────────
+-- All decks share the same reset conditions — managed centrally here.
 local function ResetAllDecks()
     -- Reset shared MSW module first so deck resets see clean state
     if PT.MSW and PT.MSW.Reset then PT.MSW.Reset() end
@@ -1786,6 +1851,12 @@ local function ResetAllDecks()
     if PT.MSW and PT.MSW.InitFromLive then PT.MSW.InitFromLive() end
 end
 
+-- LOGOUT / RELOG is the third reset case, and it needs no code: the server
+-- resets the deck when the character leaves and returns, and every deck keeps
+-- its position in plain locals that are NEVER written to SavedVariables. So a
+-- reload or a relog starts every deck at 0, which matches. Do NOT "improve"
+-- this by persisting deck position -- that would survive a reset the server
+-- performed and desync the counter permanently.
 local cmResetArmed = false; local cmResetStartTS = nil; local cmResetInstID = nil
 local lastEnterWorldTS = -10
 local resetEventFrame = CreateFrame("Frame")
@@ -1799,9 +1870,20 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
         return
     end
     if event == "ENCOUNTER_START" then
-        local diff = select(3, GetInstanceInfo())
-        -- 14-17 = Normal/Heroic/Mythic/LFR raids; 233 = Mythic Flexible (added in 12.0.7)
-        if diff and ((diff >= 14 and diff <= 17) or diff == 233) then ResetAllDecks() end
+        -- RULE: a RAID encounter start resets the server's deck. An M+ boss does
+        -- NOT -- inside a key only the yellow-gate drop resets, handled below via
+        -- CHALLENGE_MODE_RESET + WORLD_STATE_TIMER_START. ENCOUNTER_START fires on
+        -- every M+ boss too, so acting on it there would wipe the deck several
+        -- times per key.
+        --
+        -- Gate on INSTANCE TYPE, not difficulty. M+ is type "party", so it is
+        -- excluded structurally. The previous numeric list (14-17, 233) was too
+        -- narrow: the target-dummy dome reports type=raid diff=3 ("10 Player")
+        -- and fires ENCOUNTER_START (encounterID 3591 "Sinister Single"), and the
+        -- server DOES reset there -- so dummy practice was silently drifting.
+        -- Legacy raid difficulties were missing for the same reason.
+        local inInst, instType = IsInInstance()
+        if inInst and instType == "raid" then ResetAllDecks() end
         return
     end
     if event == "CHALLENGE_MODE_RESET" then
@@ -1817,7 +1899,7 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
             -- players INSIDE at the yellow-gate drop; zoning out across the drop
             -- ("the skip") keeps the deck. When a skipper zones back in, the
             -- client syncs the already-running key timer and fires a load-sync
-            -- WORLD_STATE_TIMER_START â€” which can land within the 9s arm window
+            -- WORLD_STATE_TIMER_START — which can land within the 9s arm window
             -- if the skip was fast, wrongly resetting the addon deck. A genuine
             -- gate-drop event fires while standing in the world; a load-sync one
             -- fires right after PLAYER_ENTERING_WORLD. Reject the latter.
@@ -1829,10 +1911,10 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
     end
 end)
 
--- /pt           â†’ list decks
--- /pt dw        â†’ open DW icon options
--- /pt reset dw  â†’ reset DW deck
--- â”€â”€ Minimap button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- /pt           → list decks
+-- /pt dw        → open DW icon options
+-- /pt reset dw  → reset DW deck
+-- ── Minimap button ───────────────────────────────────────────────────────────
 LDB     = LibStub and LibStub("LibDataBroker-1.1", true)
 LDBIcon = LibStub and LibStub("LibDBIcon-1.0", true)
 
@@ -1875,7 +1957,7 @@ local ptLDB = LDB and LDB:NewDataObject("ArcUI_ProcTracker", {
 
 InitMinimapButton = function()
     if not LDB or not LDBIcon or not ptLDB then
-        print("|cffFF4444ProcTracker:|r LibDBIcon not found â€” minimap button unavailable")
+        print("|cffFF4444ProcTracker:|r LibDBIcon not found — minimap button unavailable")
         return
     end
     local db = GetDB()
@@ -1911,16 +1993,16 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt <id> â†’ open panel on that deck's tab
+    -- /pt <id> → open panel on that deck's tab
     local entry = registryMap[arg]
     if entry then
         BuildOptionsPanel(entry)
         return
     end
 
-    -- /pt tdebug â†’ toggle Tempest timeline debugger
-    -- /pt tdebug start â†’ silent background logging (no window)
-    -- /pt tdebug export â†’ open window and trigger export
+    -- /pt tdebug → toggle Tempest timeline debugger
+    -- /pt tdebug start → silent background logging (no window)
+    -- /pt tdebug export → open window and trigger export
     if arg == "tdebug" or arg:sub(1,7) == "tdebug " then
         if not ArcUI_PT_TempestDebug then
             print("|cffFF4444ProcTracker:|r TempestDebug not loaded")
@@ -1943,9 +2025,9 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt etdebug â†’ toggle Elemental Tempest timeline debugger
-    -- /pt etdebug start â†’ silent background logging
-    -- /pt etdebug export â†’ open window and export
+    -- /pt etdebug → toggle Elemental Tempest timeline debugger
+    -- /pt etdebug start → silent background logging
+    -- /pt etdebug export → open window and export
     if arg == "etdebug" or arg:sub(1,8) == "etdebug " then
         if not PT.ElemTempestDebug then
             print("|cffFF4444ProcTracker:|r ElemTempestDebug not loaded")
@@ -1965,8 +2047,35 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt dwdebug â†’ toggle Doom Winds timeline debugger
-    -- /pt dwdebug export â†’ open window and export
+    -- /pt resetlab → toggle the combat-entry deck RESET probe
+    if arg == "resetlab" then
+        if not PT.ResetLab then
+            print("|cffFF4444ProcTracker:|r ResetLab not loaded")
+            return
+        end
+        PT.ResetLab.Toggle()
+        return
+    end
+
+    -- /pt sudebug → toggle Storm Unleashed timeline debugger
+    -- /pt sudebug export → open window and export
+    if arg == "sudebug" or arg:sub(1,8) == "sudebug " then
+        if not ArcUI_PT_SUDebug then
+            print("|cffFF4444ProcTracker:|r SUDebug not loaded")
+            return
+        end
+        local sub = arg:sub(9)
+        if sub == "export" then
+            if not ArcUI_PT_SUDebug.IsEnabled() then ArcUI_PT_SUDebug.Toggle() end
+            C_Timer.After(0.1, function() ArcUI_PT_SUDebug.Export() end)
+        else
+            ArcUI_PT_SUDebug.Toggle()
+        end
+        return
+    end
+
+    -- /pt dwdebug → toggle Doom Winds timeline debugger
+    -- /pt dwdebug export → open window and export
     if arg == "dwdebug" or arg:sub(1,8) == "dwdebug " then
         if not ArcUI_PT_DWDebug then
             print("|cffFF4444ProcTracker:|r DWDebug not loaded")
@@ -1982,7 +2091,7 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         return
     end
 
-    -- /pt dredebug â†’ toggle DRE Ascendance deck debugger
+    -- /pt dredebug → toggle DRE Ascendance deck debugger
     if arg == "dredebug" then
         if not ArcUI_PT_DREDebug then
             print("|cffFF4444ProcTracker:|r DREDebug not loaded")

@@ -246,6 +246,129 @@ local function DumpSUCTrail(window)
     end
 end
 
+-- ── MARKER HUNT: which spellIDs separate a DECK proc from an AWS proc? ───────
+-- Tempest has TWO sources feeding one buff, and the current attribution rests
+-- entirely on cast timing -- which collapses whenever a strike and a spend land
+-- in the same window (the AMBIGUOUS buckets). A marker spell would settle it
+-- outright, the way 1252413 did for Storm Unleashed: that turned out to be a
+-- hidden 3s dummy aura stamped at proc time, invisible to the combat log and
+-- only ever visible as a SPELL_UPDATE_COOLDOWN payload.
+--
+-- So: tally every ID seen around a gain, bucketed by what the gain was
+-- attributed to, and diff the buckets. Only the UNAMBIGUOUS buckets train the
+-- tally -- the ambiguous ones are the thing we are trying to resolve, so
+-- letting them vote would poison the answer.
+--
+--   deck   IDs seen on "spend in window, no strike" gains
+--   aws    IDs seen on "strike in window, no spend"  gains
+--   quiet  IDs seen on MSW spends that produced NO gain at all
+--
+-- A deck marker = present on deck gains, absent from aws AND quiet.
+-- THE CASE THIS EXISTS FOR: inside a Doom Winds or Ascendance window, Windstrike
+-- / Stormstrike / Crash all spend Maelstrom while ALSO driving Awakening Storms,
+-- so a strike and a spend are in the window on essentially every gain and cast
+-- timing tells you nothing. Both sources can even succeed in the same frame.
+-- Training therefore has to happen OUTSIDE burst, where the two sources can
+-- still be told apart, and the resulting marker is then applied INSIDE it.
+-- huntAmbig records burst-time gains without training on them, so a candidate
+-- can be checked against the very windows it is meant to resolve.
+local HUNT_SPAN   = 0.30   -- how far either side of a gain to collect IDs
+local huntDeck, huntAws, huntQuiet, huntAmbig = {}, {}, {}, {}
+local huntDeckN, huntAwsN, huntQuietN, huntAmbigN = 0, 0, 0, 0
+
+local DW_BUFF_FOR_BURST = 466772
+
+-- IDs that ride along with a Maelstrom SPEND rather than with a proc. They will
+-- score perfectly against AWS gains (which need no spend) and mean nothing --
+-- annotated rather than hidden, because suppressing a row could hide the real
+-- answer if one of these ever turns out to be more than it looks.
+local SPEND_ARTIFACT = {
+    [410681] = "Overflowing Maelstrom -- granted by ANY MSW spend",
+    [344179] = "Maelstrom Weapon itself",
+    [454015] = "the Tempest buff -- fires on gain AND loss, no direction",
+}
+
+-- "Burst" = a window where spends and strikes are unavoidably interleaved.
+local function InBurst()
+    if PT.MSW and PT.MSW.IsAscActive and PT.MSW.IsAscActive() then return true, "ASC" end
+    local dw = C_UnitAuras.GetPlayerAuraBySpellID
+           and C_UnitAuras.GetPlayerAuraBySpellID(DW_BUFF_FOR_BURST)
+    if dw then return true, "DW" end
+    return false, nil
+end
+
+local function HuntCollect(tally, centreT, done)
+    -- Wait out the trailing half of the span so the ring holds both sides.
+    C_Timer.After(HUNT_SPAN, function()
+        if not enabled then return end
+        local seen = {}
+        for i = 1, #sucRing do
+            local e = sucRing[i]
+            if math.abs(e.t - centreT) <= HUNT_SPAN then
+                if not (issecretvalue and issecretvalue(e.s)) then
+                    local id = tonumber(e.s)
+                    if id then seen[id] = true end
+                end
+            end
+        end
+        for id in pairs(seen) do tally[id] = (tally[id] or 0) + 1 end
+        if done then done(seen) end
+    end)
+end
+
+local function HuntReport()
+    Sep("MARKER CANDIDATES")
+    Push("gains sampled", string.format(
+        "deck=%d  aws=%d  quiet(no gain)=%d  |  ambiguous/burst=%d (not trained on)",
+        huntDeckN, huntAwsN, huntQuietN, huntAmbigN), "info")
+    if huntDeckN == 0 or huntAwsN == 0 then
+        Push("  not enough yet", "need at least one UNAMBIGUOUS gain of EACH kind, "
+            .."OUTSIDE a DW/Asc window -- a spend-only gain and a strike-only gain. "
+            .."Burst-time gains cannot train this; they are what it has to solve.", "warn")
+        return
+    end
+    local rows = {}
+    local all = {}
+    for id in pairs(huntDeck) do all[id] = true end
+    for id in pairs(huntAws)  do all[id] = true end
+    for id in pairs(all) do
+        local d = (huntDeck[id]  or 0) / huntDeckN
+        local a = (huntAws[id]   or 0) / huntAwsN
+        local q = huntQuietN > 0 and ((huntQuiet[id] or 0) / huntQuietN) or 0
+        local m = huntAmbigN > 0 and ((huntAmbig[id] or 0) / huntAmbigN) or 0
+        rows[#rows+1] = { id = id, d = d, a = a, q = q, m = m, score = d - a }
+    end
+    table.sort(rows, function(x, y)
+        if x.score ~= y.score then return math.abs(x.score) > math.abs(y.score) end
+        return x.id < y.id
+    end)
+    local found = false
+    for i = 1, math.min(#rows, 14) do
+        local r = rows[i]
+        -- Only interesting if it leans one way AND is not just background noise
+        -- that fires on every spend regardless.
+        local artifact = SPEND_ARTIFACT[r.id]
+        local clean = not artifact
+                  and ((r.d == 1 and r.a == 0 and r.q == 0)
+                    or (r.a == 1 and r.d == 0 and r.q == 0))
+        if clean then found = true end
+        local nm = C_Spell.GetSpellName and C_Spell.GetSpellName(r.id)
+        local lean = r.score > 0 and "DECK" or (r.score < 0 and "AWS" or "--")
+        Push(string.format("  %s%d", clean and ">>> " or "    ", r.id),
+            string.format("deck %.0f%%  aws %.0f%%  quiet %.0f%%  burst %.0f%%  leans %s  %s%s",
+                r.d * 100, r.a * 100, r.q * 100, r.m * 100, lean,
+                nm and ('"'..nm..'"') or "(unnamed)",
+                clean and "   <<< SEPARATOR"
+                    or (artifact and ("   [artifact: "..artifact.."]") or "")),
+            clean and "tempest_gain" or (artifact and "warn" or "info"))
+    end
+    if not found then
+        Push("  no clean separator", "no ID is exclusive to one source -- judge by the "
+            .."lean percentages, or the two sources may share every signal and "
+            .."cast timing stays the only discriminator", "warn")
+    end
+end
+
 local function AttributeGain(trigger)
     if not enabled then return end
     local now = GetTime()
@@ -278,6 +401,28 @@ local function AttributeGain(trigger)
         verdict, bucket, col = "NEITHER (no cast in window)", "neither", "FF4444"
     end
     attrib[bucket] = attrib[bucket] + 1
+
+    -- Feed the marker hunt from the UNAMBIGUOUS buckets only. A burst-time gain
+    -- is never training data even if it happens to look clean: inside DW/Asc the
+    -- "no strike in window" reading is an artifact of what we sampled, not a
+    -- statement about the source.
+    local burst, burstWhy = InBurst()
+    if burst then
+        huntAmbigN = huntAmbigN + 1
+        HuntCollect(huntAmbig, now)
+    elseif bucket == "spenderOnly" then
+        huntDeckN = huntDeckN + 1
+        HuntCollect(huntDeck, now)
+    elseif bucket == "strikeOnly" then
+        huntAwsN = huntAwsN + 1
+        HuntCollect(huntAws, now)
+    elseif bucket == "bothStrikeLast" or bucket == "bothSpenderLast" then
+        huntAmbigN = huntAmbigN + 1
+        HuntCollect(huntAmbig, now)
+    end
+    if burst then
+        verdict = verdict .. "  |cffFF8844[" .. burstWhy .. " BURST -- attribution unreliable]|r"
+    end
 
     Push("TEMPEST GAIN ["..trigger.."]", string.format(
         "%s  |  strike=%s age=%s seq=%d   spender=%s age=%s seq=%d",
@@ -419,6 +564,19 @@ local function OnMSWConsumedDbg(stacksSpent, spenderID, ascActive)
         "stacks="..tostring(stacksSpent)
         .." spender="..tostring(spenderID).."("..sname..")"
         ..(ascActive and " [ASC]" or ""), "msw_consume")
+
+    -- Baseline for the hunt: a spend that produces NO gain. Anything appearing
+    -- here fires on ordinary spends and therefore cannot be a proc marker, no
+    -- matter how well it correlates with deck gains.
+    local centre = GetTime()
+    C_Timer.After(0.05, function()
+        if not enabled then return end
+        -- lastAttribT is stamped by AttributeGain, so if it moved into this
+        -- window a gain happened and this was not a quiet spend.
+        if lastAttribT and math.abs(lastAttribT - centre) <= 0.05 then return end
+        huntQuietN = huntQuietN + 1
+        HuntCollect(huntQuiet, centre)
+    end)
 end
 
 -- ── UI ────────────────────────────────────────────────────────────────────────
@@ -427,7 +585,10 @@ local DoExport  -- forward declaration
 local function BuildUI()
     if mainFrame then mainFrame:Show(); return end
 
-    local W, H = 680, 560
+    -- 780 not 680: the button row is full at seven 88px buttons and Candidates
+    -- makes eight. The scroll frame anchors to the frame edges and the editbox
+    -- derives from W, so both follow.
+    local W, H = 780, 560
     local f = CreateFrame("Frame", "ArcUI_PT_TempestDebugFrame", UIParent, "BackdropTemplate")
     f:SetSize(W, H)
     f:SetPoint("CENTER")
@@ -479,6 +640,10 @@ local function BuildUI()
     Btn("Clear", 10, function()
         log = {}; rawLog = {}; logDirty = true
         if logBox then logBox:SetText("") end
+    end)
+
+    Btn("Candidates", 668, function()
+        HuntReport()
     end)
 
     local pb = Btn("Pause", 104, nil)
@@ -615,6 +780,10 @@ end)
 local function Enable()
     enabled      = true
     sessionStart = GetTime()
+    -- Carrying tallies across toggles would mix samples from different talent
+    -- setups or fights into one diff.
+    wipe(huntDeck); wipe(huntAws); wipe(huntQuiet); wipe(huntAmbig)
+    huntDeckN, huntAwsN, huntQuietN, huntAmbigN = 0, 0, 0, 0
     dbgFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
     dbgFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
     dbgFrame:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")

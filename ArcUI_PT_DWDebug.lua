@@ -369,7 +369,10 @@ end
 -- proc is confirmed, and let the log say whether a signature exists.
 local sucRing, SUC_MAX = {}, 40
 
+local HuntNote   -- forward declaration; defined in the marker-hunt block below
+
 local function NoteSpellUpdate(spellID, baseSpellID, category, startRecovery, itemID)
+    HuntNote(spellID)
     sucRing[#sucRing+1] = {
         t = GetTime(), s = spellID, b = baseSpellID,
         c = category, r = startRecovery, i = itemID,
@@ -396,6 +399,120 @@ local function DumpSpellUpdateTrail(window)
             .."  cat="..SafeVal(e.c).."  startRec="..SafeVal(e.r)
             .."  item="..SafeVal(e.i), "rehook")
     end
+end
+
+-- ── MARKER HUNT: spend-window ID capture + automatic set diff ────────────────
+-- How 1252413 was found for Storm Unleashed: on a spend that procced, the
+-- SPELL_UPDATE_COOLDOWN payload carried one extra spellID that never appeared on
+-- a spend that did not proc. That ID turned out to be a hidden 3s dummy aura
+-- stamped at proc time -- a pure GAIN signal, unlike the visible buff whose
+-- cooldown updates on every state change and cannot tell direction.
+--
+-- This does the same diff for Doom Winds, but computes it instead of leaving it
+-- to the eye: every ID seen inside a spend window is tallied against whether
+-- that window procced. A marker shows up as present in EVERY proc window and
+-- NO non-proc window. Ground truth for "did it proc" is the DW deck's existing
+-- CDM path, which is what we are trying to replace -- fine as a reference here
+-- precisely because it is independent of the thing being measured.
+local HUNT_CAPTURE = 0.25   -- collect IDs for this long after the spend
+local HUNT_VERDICT = 0.50   -- then decide proc/no-proc (CDM can lag the spend)
+
+local huntOpenUntil   = 0
+local huntIDs         = nil   -- set of spellIDs seen in the open window
+local huntProcT       = 0     -- GetTime() of the last accepted DW gain
+local huntProcWins    = 0
+local huntNoProcWins  = 0
+local huntSeenProc    = {}    -- id -> count of PROC windows it appeared in
+local huntSeenNoProc  = {}    -- id -> count of NO-PROC windows it appeared in
+
+function HuntNote(spellID)
+    if not huntIDs then return end
+    if GetTime() > huntOpenUntil then return end
+    if issecretvalue and issecretvalue(spellID) then return end
+    local id = tonumber(spellID)
+    if id then huntIDs[id] = true end
+end
+
+local function HuntReport()
+    Sep("MARKER CANDIDATES")
+    Push("windows sampled", "proc="..huntProcWins.."  no-proc="..huntNoProcWins, "info")
+    if huntProcWins == 0 then
+        Push("  nothing yet", "need at least one PROC window -- keep fighting", "warn")
+        return
+    end
+    -- RANK, do not filter. Requiring "absent from every no-proc window" throws
+    -- away the true marker the moment CDM mislabels one window -- and CDM is the
+    -- fallible thing we are trying to replace. Score each ID by how much more
+    -- often it shows up on procs than on non-procs, and show the top of the
+    -- list; a near-miss with one stray no-proc hit stays visible instead of
+    -- silently vanishing.
+    local rows = {}
+    for id, n in pairs(huntSeenProc) do
+        local no    = huntSeenNoProc[id] or 0
+        local pRate = n / huntProcWins
+        local nRate = huntNoProcWins > 0 and (no / huntNoProcWins) or 0
+        rows[#rows+1] = { id = id, p = n, n = no, score = pRate - nRate }
+    end
+    table.sort(rows, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        return a.id < b.id
+    end)
+
+    local perfect = 0
+    for i = 1, math.min(#rows, 12) do
+        local r = rows[i]
+        local isPerfect = (r.p == huntProcWins and r.n == 0)
+        if isPerfect then perfect = perfect + 1 end
+        local nm = C_Spell.GetSpellName and C_Spell.GetSpellName(r.id)
+        Push(string.format("  %s%d", isPerfect and ">>> " or "    ", r.id),
+            string.format("proc %d/%d  no-proc %d/%d  score %+.2f  %s%s",
+                r.p, huntProcWins, r.n, huntNoProcWins, r.score,
+                nm and ('"'..nm..'"') or "(unnamed)",
+                isPerfect and "   <<< CLEAN" or ""),
+            isPerfect and "dw_gain" or "info")
+    end
+    if perfect == 0 then
+        Push("  no clean candidate yet", "nothing is in every proc window AND absent "
+            .."from all no-proc windows -- judge by score above; a high score with "
+            .."one stray no-proc hit is still a strong lead", "warn")
+    end
+    Push("  reminder", "Doom Winds summons a Feral Spirit via Rolling Thunder (node "
+        .."94889) or Feral Spirit (node 109194), so wolf IDs 148988 / 469332 / "
+        .."224127 are a CONSEQUENCE of a proc, not noise -- but they are "
+        .."talent-gated, so only usable when one of those nodes is taken", "info")
+end
+
+local function HuntOpen()
+    huntIDs       = {}
+    huntOpenUntil = GetTime() + HUNT_CAPTURE
+    local opened  = GetTime()
+    C_Timer.After(HUNT_VERDICT, function()
+        if not enabled then huntIDs = nil; return end
+        local ids = huntIDs
+        huntIDs   = nil
+        if not ids then return end
+        local isProc = huntProcT >= opened - 0.10
+        local tally  = isProc and huntSeenProc or huntSeenNoProc
+        if isProc then huntProcWins = huntProcWins + 1
+        else huntNoProcWins = huntNoProcWins + 1 end
+
+        local list, n = {}, 0
+        for id in pairs(ids) do
+            tally[id] = (tally[id] or 0) + 1
+            n = n + 1
+            list[#list+1] = id
+        end
+        table.sort(list)
+        local shown = {}
+        for i = 1, math.min(#list, 40) do shown[i] = tostring(list[i]) end
+        Push("HUNT WINDOW ["..(isProc and "PROC" or "no proc").."]",
+            n.." ids: "..table.concat(shown, " ")..(#list > 40 and " ..." or ""),
+            isProc and "dw_gain" or "info")
+
+        -- Re-report the running diff every few proc windows so the answer
+        -- surfaces without having to ask for it.
+        if isProc and huntProcWins % 3 == 0 then HuntReport() end
+    end)
 end
 
 -- ── RefreshData storm counter ─────────────────────────────────────────────────
@@ -710,6 +827,7 @@ local function OnMSWConsumedDbg(stacksSpent, spenderID, ascActive)
         .."  |cff888888total="..tostring(tot).." stk="..tostring(totStk)
         .." noASC="..tostring(noAsc).." noASCstk="..tostring(noAscS).."|r",
         "msw_consume")
+    HuntOpen()
 end
 
 -- ── Wire DW deck debug callbacks ──────────────────────────────────────────────
@@ -723,12 +841,19 @@ local function WireDeckDebug()
         if not enabled then return end
         if accepted then
             lastSource = tostring(source)
+            huntProcT  = GetTime()   -- marks the open spend window as a PROC
             if winStats then
                 local now = GetTime()
                 winStats.counted   = winStats.counted + 1
                 winStats.lastProcT = now
-                -- Advance the predicted end by the refresh model.
-                if winStats.predEnd then
+                -- Advance the predicted end by the refresh model -- but ONLY for
+                -- the second proc onward. The proc that OPENED this window is
+                -- already baked into predEnd (set to startT + DW_BASE_DUR at
+                -- open), so extending on the first counted proc double-applied
+                -- it and made every correct single-proc window report
+                -- "predict +12.25s, observed +10.00s -- buff died 2.25s early".
+                -- Only a genuine back-to-back refreshes the duration.
+                if winStats.predEnd and winStats.counted > 1 then
                     local remaining = winStats.predEnd - now
                     if remaining < 0 then remaining = 0 end
                     winStats.predEnd = now + math.min(remaining + DW_BASE_DUR, DW_MAX_DUR)
@@ -933,6 +1058,10 @@ local function BuildUI()
         self:SetText(paused and "|cffFF4444Resume|r" or "Pause")
     end)
 
+    Btn("Candidates", 510, function()
+        HuntReport()
+    end)
+
     Btn("Scan Frames", 210, function()
         ScanAndHookFrames()
         Sep("MANUAL SCAN")
@@ -1012,6 +1141,14 @@ local function Enable()
     windowIdx      = 0
     winStats       = nil
     pendingCounted = 0
+    -- Reset the marker hunt; carrying tallies across toggles would pollute the diff
+    huntIDs        = nil
+    huntOpenUntil  = 0
+    huntProcT      = 0
+    huntProcWins   = 0
+    huntNoProcWins = 0
+    wipe(huntSeenProc)
+    wipe(huntSeenNoProc)
     pushIdx        = 0
     pushTime       = {}
     endTime        = {}

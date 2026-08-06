@@ -1,10 +1,10 @@
-﻿-- ArcUI_PT_Bar.lua
+-- ArcUI_PT_Bar.lua
 -- Bar widget for ProcTracker decks.
 -- StatusBar fill, tick marks at exact proc positions, two independent text frames.
 -- Text frames support free-drag OR anchor-to-bar with offset.
 -- No pcall. Zero polling.
 
--- â”€â”€ Bar textures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Bar textures ──────────────────────────────────────────────────────────────
 local BAR_TEXTURES = {
     ["Blizzard"]   = "Interface\\TargetingFrame\\UI-StatusBar",
     ["Solid"]      = "Interface\\Buttons\\WHITE8X8",
@@ -32,7 +32,7 @@ local ANCHOR_POINT_KEYS = {
     "FREE","TOPLEFT","TOP","TOPRIGHT","LEFT","CENTER","RIGHT","BOTTOMLEFT","BOTTOM","BOTTOMRIGHT"
 }
 
--- â”€â”€ SavedVariables defaults â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── SavedVariables defaults ───────────────────────────────────────────────────
 local BAR_DEFAULTS = {
     barEnabled     = false,
     barX=0, barY=130,
@@ -138,11 +138,11 @@ local BAR_APPEARANCE_KEYS = {
     "barProcCountDown","barProcShowSuffix",
 }
 
--- â”€â”€ Per-deck proc position tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Per-deck proc position tracking ──────────────────────────────────────────
 local procPositions = {}
 local lastProcCount = {}
 
--- â”€â”€ DB helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── DB helpers ────────────────────────────────────────────────────────────────
 local function GetDB()
     ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
     return ArcUI_ProcTrackerDB
@@ -168,7 +168,7 @@ local function BarDB(id)
     return t
 end
 
--- â”€â”€ Proc color (for text â€” uses barEmpty/Half/Full) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Proc color (for text — uses barEmpty/Half/Full) ─────────────────────────
 local function TextProcColor(db, procs, maxProcs)
     if db.barProcCountDown then
         local rem = maxProcs - procs
@@ -182,7 +182,7 @@ local function TextProcColor(db, procs, maxProcs)
     end
 end
 
--- â”€â”€ Per-text state color (each text has its own independent state colors) â”€â”€â”€â”€â”€â”€
+-- ── Per-text state color (each text has its own independent state colors) ──────
 local function DeckTextStateColor(db, procs, maxProcs)
     if db.barProcCountDown then
         local rem = maxProcs - procs
@@ -209,7 +209,7 @@ local function ProcTextStateColor(db, procs, maxProcs)
     end
 end
 
--- â”€â”€ Bar fill color (separate empty override for the bar texture itself) â”€â”€â”€â”€â”€â”€â”€
+-- ── Bar fill color (separate empty override for the bar texture itself) ───────
 local function BarFillColor(db, procs, maxProcs)
     -- single-color mode: one fixed fill regardless of proc state
     if db.barFillSingle then
@@ -231,7 +231,7 @@ local function BarFillColor(db, procs, maxProcs)
     end
 end
 
--- â”€â”€ Text anchor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Text anchor ───────────────────────────────────────────────────────────────
 local function ApplyTextAnchor(tf, barFrame, anchor, offX, offY, freeX, freeY)
     tf:ClearAllPoints()
     if anchor == "FREE" or not barFrame then
@@ -241,7 +241,7 @@ local function ApplyTextAnchor(tf, barFrame, anchor, offX, offY, freeX, freeY)
     end
 end
 
--- â”€â”€ Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Update ────────────────────────────────────────────────────────────────────
 local function HideAllBarElements(entry)
     local bw = entry.barWidget
     if bw then bw:Hide() end
@@ -350,7 +350,7 @@ function UpdateBar(entry)
     local curLevel  = db.barLevel or 5
     bw:SetFrameStrata(curStrata)
     bw:SetFrameLevel(curLevel)
-    -- text must sit above bar(+0) â†’ ticks(+10) â†’ border(+15) â†’ icon(+20)
+    -- text must sit above bar(+0) → ticks(+10) → border(+15) → icon(+20)
     local textLevel = curLevel + 30
     if bw._deckTextFrame then
         bw._deckTextFrame:SetFrameStrata(curStrata)
@@ -366,7 +366,7 @@ function UpdateBar(entry)
     bar:SetMinMaxValues(0, deckSize)
     bar:SetValue(fillVal)
     bar:SetStatusBarColor(br, bg_, bb_, ba_)
-    -- Orientation: VERTICAL makes bar fill bottomâ†’top (same as ArcUI bars)
+    -- Orientation: VERTICAL makes bar fill bottom→top (same as ArcUI bars)
     bar:SetOrientation(vert and "VERTICAL" or "HORIZONTAL")
     -- ReverseFill: flips which end the bar fills from
     bar:SetReverseFill(db.barFillReverse == true)
@@ -385,7 +385,7 @@ function UpdateBar(entry)
     -- Background
     bw._bg:SetVertexColor(db.barBgR, db.barBgG, db.barBgB, db.barBgA)
 
-    -- Border â€” 4 textures parented directly to bw (not StatusBar),
+    -- Border — 4 textures parented directly to bw (not StatusBar),
     -- so SetColorTexture is non-secret and renders correctly.
     local bf = bw._borderFrame
     if db.barBorderEnabled then
@@ -420,9 +420,9 @@ function UpdateBar(entry)
     -- when the proc fired, accounting for countDown and reverseFill.
     --
     -- With countDown: bar starts full (fillVal=deckSize) and drains.
-    --   Proc at frac means fillVal was (1-frac)*deckSize â†’ fill level = (1-frac).
+    --   Proc at frac means fillVal was (1-frac)*deckSize → fill level = (1-frac).
     -- Without countDown: bar starts empty and fills.
-    --   Proc at frac means fillVal was frac*deckSize â†’ fill level = frac.
+    --   Proc at frac means fillVal was frac*deckSize → fill level = frac.
     -- barFillReverse flips which physical end is "full" (handled by SetReverseFill
     --   on the StatusBar), so we flip the visual position too.
     --
@@ -448,16 +448,16 @@ function UpdateBar(entry)
             tick:ClearAllPoints()
             tick:SetColorTexture(tr,tg,tb,ta)
             if vert then
-                -- Vertical bar fills bottomâ†’top (SetOrientation VERTICAL)
-                -- visualFrac=1 â†’ top of bar, visualFrac=0 â†’ bottom
+                -- Vertical bar fills bottom→top (SetOrientation VERTICAL)
+                -- visualFrac=1 → top of bar, visualFrac=0 → bottom
                 local yOff = visualFrac * frameH
                 tick:SetPoint("BOTTOMLEFT",  bw, "BOTTOMLEFT",  0, yOff)
                 tick:SetPoint("BOTTOMRIGHT", bw, "BOTTOMRIGHT", 0, yOff)
                 tick:SetHeight(thick)
                 tick:SetWidth(0)  -- width driven by the two SetPoint anchors
             else
-                -- Horizontal bar fills leftâ†’right (SetOrientation HORIZONTAL)
-                -- visualFrac=0 â†’ left edge, visualFrac=1 â†’ right edge
+                -- Horizontal bar fills left→right (SetOrientation HORIZONTAL)
+                -- visualFrac=0 → left edge, visualFrac=1 → right edge
                 local xOff = visualFrac * frameW
                 tick:SetPoint("TOPLEFT",    bw, "TOPLEFT",    xOff, 0)
                 tick:SetPoint("BOTTOMLEFT", bw, "BOTTOMLEFT", xOff, 0)
@@ -559,7 +559,7 @@ function UpdateBar(entry)
     end
 end
 
--- â”€â”€ Widget builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Widget builder ────────────────────────────────────────────────────────────
 local function MakeDraggableTextFrame(frameName, id, xKey, yKey, anchorKey)
     local tf = CreateFrame("Frame", frameName, UIParent)
     tf:SetSize(80, 24)
@@ -661,7 +661,7 @@ local function BuildBarWidget(entry)
     f._ticks = ticks
 
     -- Border: 4 textures on a frame child of f (NOT parented to StatusBar)
-    -- This is critical â€” StatusBar children inherit taint in some cases.
+    -- This is critical — StatusBar children inherit taint in some cases.
     local borderFrame = CreateFrame("Frame", nil, f)
     borderFrame:SetAllPoints(f)
     borderFrame:SetFrameLevel(tickOverlay:GetFrameLevel()+5)
@@ -674,7 +674,7 @@ local function BuildBarWidget(entry)
     end
     f._borderFrame = bf
 
-    -- Icon frame (child of f, above tick overlay) â€” frame holds texture + border edges
+    -- Icon frame (child of f, above tick overlay) — frame holds texture + border edges
     local barIconFrame = CreateFrame("Frame", nil, f)
     barIconFrame:SetSize(db.barIconSize or 16, db.barIconSize or 16)
     barIconFrame:SetFrameLevel(borderFrame:GetFrameLevel() + 5)  -- icon above border
@@ -721,7 +721,7 @@ local function BuildBarWidget(entry)
     return f
 end
 
--- â”€â”€ Proc position tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Proc position tracking ────────────────────────────────────────────────────
 local function CheckProcFired(entry)
     local id    = entry.id
     local procs = entry.GetProcs()
@@ -737,7 +737,7 @@ local function CheckProcFired(entry)
     lastProcCount[id] = procs
 end
 
--- â”€â”€ Hook PT.UpdateDeck â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Hook PT.UpdateDeck ────────────────────────────────────────────────────────
 local _origUpdateDeck = PT.UpdateDeck
 function PT.UpdateDeck(id)
     _origUpdateDeck(id)
@@ -749,7 +749,7 @@ function PT.UpdateDeck(id)
     PT.ApplyBarVisibility(entry)
 end
 
--- â”€â”€ Options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Options ───────────────────────────────────────────────────────────────────
 local function BuildBarOptionsGroup(entry)
     local id = entry.id
     local function db() return BarDB(id) end
@@ -815,7 +815,7 @@ local function BuildBarOptionsGroup(entry)
                         registeredNames[e.id] = e.name
                     end)
                 end
-                -- Second pass: all saved bar data â€” includes decks from other specs
+                -- Second pass: all saved bar data — includes decks from other specs
                 -- that aren't currently registered (e.g. Enhancement bars on Elemental)
                 local db2 = ArcUI_ProcTrackerDB and ArcUI_ProcTrackerDB.bars or {}
                 for deckID, _ in pairs(db2) do
@@ -877,7 +877,7 @@ local function BuildBarOptionsGroup(entry)
         _spLayout1 = { type="description", name=" ", order=o(), width=0.1, hidden=function() return secHidden("layout") end },
         barRotateFill = {
             type="toggle", name="Rotate Fill",
-            desc="Rotates the bar texture pixels. Use alongside Vertical for aesthetic effect â€” does not change fill direction.",
+            desc="Rotates the bar texture pixels. Use alongside Vertical for aesthetic effect — does not change fill direction.",
             order=o(), width=0.9, hidden=function() return secHidden("layout") end,
             get=function() return db().barRotateFill==true end,
             set=function(_,v) db().barRotateFill=v; refresh() end,
@@ -1083,7 +1083,7 @@ local function BuildBarOptionsGroup(entry)
         },
         barFillSingle = {
             type="toggle", name="Single Fill Color",
-            desc="Use one fixed color for the bar fill instead of the per-state colors â€” the same idea as the texts' Fixed Color.",
+            desc="Use one fixed color for the bar fill instead of the per-state colors — the same idea as the texts' Fixed Color.",
             order=o(), width="full", hidden=function() return secHidden("fillColors") end,
             get=function() return db().barFillSingle==true end,
             set=function(_,v) db().barFillSingle=v; refresh() end,
@@ -1552,7 +1552,7 @@ local function BuildBarOptionsGroup(entry)
     }
 end
 
--- â”€â”€ Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- ── Bootstrap ─────────────────────────────────────────────────────────────────
 do
     local _origRegister = PT.RegisterDeck
     function PT.RegisterDeck(def)
@@ -1586,8 +1586,8 @@ PT.UpdateBar = function(id)
 end
 
 -- Called by deck ApplyTalentVisibility to mirror talent gating on the bar.
--- talented=true  â†’ show bar if barEnabled; run UpdateBar
--- talented=false â†’ hide bar + text frames unconditionally
+-- talented=true  → show bar if barEnabled; run UpdateBar
+-- talented=false → hide bar + text frames unconditionally
 function PT.ApplyBarTalentVisibility(id, talented)
     local entry = PT.GetDeck(id)
     if not entry or not entry.barWidget then return end
