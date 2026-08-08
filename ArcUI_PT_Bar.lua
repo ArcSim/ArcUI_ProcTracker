@@ -476,7 +476,14 @@ function UpdateBar(entry)
         PT.SetFontSafe(dtf.text, db.barDeckFont, deckFontSize)
         dtf.text:SetShadowOffset(1,-1); dtf.text:SetShadowColor(0,0,0,1)
         local deckSuffix = db.barDeckShowSuffix and ("/"..tostring(deckSize)) or ""
-        dtf.text:SetText(tostring(pos)..deckSuffix)
+        -- Same per-deck text override the icon honours: a tracker whose useful
+        -- readout is not a deck position formats its own string.
+        local deckStr = tostring(pos)..deckSuffix
+        if entry.GetDeckText then
+            local s = entry.GetDeckText()
+            if s ~= nil then deckStr = s end
+        end
+        dtf.text:SetText(deckStr)
         local dtr,dtg,dtb,dta
         if db.barDeckTextUseStateColor then
             dtr,dtg,dtb,dta = DeckTextStateColor(db, procs, maxProcs)
@@ -542,7 +549,12 @@ function UpdateBar(entry)
         PT.SetFontSafe(ptf.text, db.barProcFont, procFontSize)
         ptf.text:SetShadowOffset(1,-1); ptf.text:SetShadowColor(0,0,0,1)
         local procSuffix = db.barProcShowSuffix and ("/"..tostring(maxProcs)) or ""
-        ptf.text:SetText(tostring(procDisp)..procSuffix)
+        local procStr = tostring(procDisp)..procSuffix
+        if entry.GetProcText then
+            local s = entry.GetProcText()
+            if s ~= nil then procStr = s end
+        end
+        ptf.text:SetText(procStr)
         local ptr,ptg,ptb,pta
         if db.barProcTextUseStateColor then
             ptr,ptg,ptb,pta = ProcTextStateColor(db, procs, maxProcs)
@@ -580,8 +592,23 @@ local function MakeDraggableTextFrame(frameName, id, xKey, yKey, anchorKey)
     end)
     tf:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
-        local _,_,_,x,y = self:GetPoint()
-        local db = BarDB(id); db[xKey]=x; db[yKey]=y
+        -- Normalize to CENTER offsets. StartMoving re-anchors the frame to
+        -- whichever screen corner it ended up nearest, so a raw GetPoint() here
+        -- returns CORNER-space numbers -- and ApplyTextAnchor re-applies them as
+        -- SetPoint("CENTER", UIParent, "CENTER", freeX, freeY), i.e. CENTER-space.
+        -- The text then jumps on the next reload. The bar frame's own OnDragStop
+        -- documents and fixes exactly this; MakeDraggableTextFrame never got it.
+        local db = BarDB(id)
+        local cx, cy = self:GetCenter()
+        local ux, uy = UIParent:GetCenter()
+        local fs = self:GetEffectiveScale()
+        local us = UIParent:GetEffectiveScale()
+        if cx and ux and fs and fs > 0 then
+            db[xKey] = math.floor(cx - (ux * us / fs) + 0.5)
+            db[yKey] = math.floor(cy - (uy * us / fs) + 0.5)
+            self:ClearAllPoints()
+            self:SetPoint("CENTER", UIParent, "CENTER", db[xKey], db[yKey])
+        end
     end)
     tf.text = tf:CreateFontString(nil, "OVERLAY")
     tf.text:SetPoint("CENTER")
@@ -600,6 +627,12 @@ local function BuildBarWidget(entry)
     f:SetSize(db.barW, db.barH)
     f:SetFrameStrata(db.barStrata or "HIGH")
     f:SetFrameLevel(db.barLevel or 5)
+    -- Scale BEFORE the anchor. SetPoint offsets live in the frame's own scale
+    -- space, and barX/barY were captured at the saved scale (see OnDragStop), so
+    -- anchoring at scale 1.0 and only scaling later in UpdateBar renders the bar
+    -- off by a factor of barScale until the first redraw. BuildIconWidget already
+    -- applies iconScale at build time; this brings the bar in line.
+    f:SetScale(db.barScale or 1.0)
     f:SetPoint("CENTER", UIParent, "CENTER", db.barX, db.barY)
     f:SetClampedToScreen(true)
     -- respect a saved lock at login (locked = click-through, like the icon)
@@ -759,6 +792,12 @@ local function BuildBarOptionsGroup(entry)
     local order = 0
     local function o() order=order+1; return order end
     local function hidden() return not db().barEnabled end
+
+    -- Per-deck option overrides, same contract as the icon panel: entry.ui
+    -- renames, entry.uiHide removes. Decks that define neither are untouched.
+    local UI     = entry.ui     or {}
+    local UIHIDE = entry.uiHide or {}
+    local function L(key, default) return UI[key] or default end
 
     -- Session-only collapsed state per section (resets on reload, same as ArcUI)
     local sec = {
@@ -1029,13 +1068,23 @@ local function BuildBarOptionsGroup(entry)
                 db().barScale = v
                 local bw = entry.barWidget
                 if bw then
-                    -- Compensate position so bar stays in place
-                    local _,_,_,x,y = bw:GetPoint()
+                    -- Compensate position so the bar stays in place.
+                    -- Read the SAVED offsets, not a raw GetPoint(): GetPoint returns
+                    -- whatever anchor the frame currently carries, which is only
+                    -- CENTER-space if nothing re-anchored it since the last drag.
+                    -- barX/barY are always CENTER-space by construction, so they are
+                    -- the safe source. Floor like OnDragStop does, otherwise this
+                    -- writes long floats into the saved position (which is how
+                    -- tempest/elemtempest ended up with fractional barX).
+                    local bdb  = BarDB(id)
                     local ratio = old / v
+                    local x = (bdb.barX or 0) * ratio
+                    local y = (bdb.barY or 0) * ratio
                     bw:SetScale(v)
                     bw:ClearAllPoints()
-                    bw:SetPoint("CENTER", UIParent, "CENTER", x*ratio, y*ratio)
-                    local bdb = BarDB(id); bdb.barX = x*ratio; bdb.barY = y*ratio
+                    bw:SetPoint("CENTER", UIParent, "CENTER", x, y)
+                    bdb.barX = math.floor(x + 0.5)
+                    bdb.barY = math.floor(y + 0.5)
                 end
             end,
         },
@@ -1204,7 +1253,7 @@ local function BuildBarOptionsGroup(entry)
         },
         barTickEnabled = {
             type="toggle", name="Show Tick Marks",
-            desc="Draws a tick on the bar at the exact deck position where each proc fired.",
+            desc=L("barTickDesc","Draws a tick on the bar at the exact deck position where each proc fired."),
             order=o(), width=0.9, hidden=function() return secHidden("ticks") end,
             get=function() return db().barTickEnabled==true end,
             set=function(_,v) db().barTickEnabled=v; refresh() end,
@@ -1314,7 +1363,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Deck Position Text
         deckTextHeader = {
-            type="toggle", name="Deck Position Text", dialogControl="CollapsibleHeader", arcGroup="Texts",
+            type="toggle", name=L("barDeckTextHeader","Deck Position Text"), dialogControl="CollapsibleHeader", arcGroup="Texts",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.deckText end,
@@ -1324,8 +1373,8 @@ local function BuildBarOptionsGroup(entry)
             end,
         },
         barDeckTextEnabled = {
-            type="toggle", name="Show Deck Position",
-            desc="Displays the current deck position as a draggable text element.",
+            type="toggle", name=L("barDeckShow","Show Deck Position"),
+            desc=L("barDeckShowDesc","Displays the current deck position as a draggable text element."),
             order=o(), width=1.0, hidden=function() return secHidden("deckText") end,
             get=function() return db().barDeckTextEnabled==true end,
             set=function(_,v) db().barDeckTextEnabled=v; refresh() end,
@@ -1335,7 +1384,7 @@ local function BuildBarOptionsGroup(entry)
         barDeckCountDown = {
             type="toggle", name="Count Down",
             order=o(), width=0.75,
-            hidden=function() return secHidden("deckText") or not db().barDeckTextEnabled end,
+            hidden=function() return secHidden("deckText") or not db().barDeckTextEnabled or UIHIDE.barDeckCountDown end,
             get=function() return db().barDeckCountDown==true end,
             set=function(_,v) db().barDeckCountDown=v; refresh() end,
         },
@@ -1345,7 +1394,7 @@ local function BuildBarOptionsGroup(entry)
             type="toggle", name="Show /Size Suffix",
             desc="Show the deck size after the position e.g. 142/333.",
             order=o(), width=0.85,
-            hidden=function() return secHidden("deckText") or not db().barDeckTextEnabled end,
+            hidden=function() return secHidden("deckText") or not db().barDeckTextEnabled or UIHIDE.barDeckShowSuffix end,
             get=function() return db().barDeckShowSuffix==true end,
             set=function(_,v) db().barDeckShowSuffix=v; refresh() end,
         },
@@ -1433,7 +1482,7 @@ local function BuildBarOptionsGroup(entry)
 
         -- Proc Count Text
         procTextHeader = {
-            type="toggle", name="Proc Count Text", dialogControl="CollapsibleHeader", arcGroup="Texts",
+            type="toggle", name=L("barProcTextHeader","Proc Count Text"), dialogControl="CollapsibleHeader", arcGroup="Texts",
             order=o(), width="full",
             hidden=hidden,
             get=function() return not sec.procText end,
@@ -1443,8 +1492,8 @@ local function BuildBarOptionsGroup(entry)
             end,
         },
         barProcTextEnabled = {
-            type="toggle", name="Show Proc Count",
-            desc="Displays the proc count for the current deck as a draggable text element.",
+            type="toggle", name=L("barProcShow","Show Proc Count"),
+            desc=L("barProcShowDesc","Displays the proc count for the current deck as a draggable text element."),
             order=o(), width=1.0, hidden=function() return secHidden("procText") end,
             get=function() return db().barProcTextEnabled==true end,
             set=function(_,v) db().barProcTextEnabled=v; refresh() end,
@@ -1454,7 +1503,7 @@ local function BuildBarOptionsGroup(entry)
         barProcCountDown = {
             type="toggle", name="Count Down",
             order=o(), width=0.75,
-            hidden=function() return secHidden("procText") or not db().barProcTextEnabled end,
+            hidden=function() return secHidden("procText") or not db().barProcTextEnabled or UIHIDE.barProcCountDown end,
             get=function() return db().barProcCountDown==true end,
             set=function(_,v) db().barProcCountDown=v; refresh() end,
         },
@@ -1464,7 +1513,7 @@ local function BuildBarOptionsGroup(entry)
             type="toggle", name="Show /Max Suffix",
             desc="Show the max procs after the count e.g. 1/2.",
             order=o(), width=0.85,
-            hidden=function() return secHidden("procText") or not db().barProcTextEnabled end,
+            hidden=function() return secHidden("procText") or not db().barProcTextEnabled or UIHIDE.barProcShowSuffix end,
             get=function() return db().barProcShowSuffix~=false end,
             set=function(_,v) db().barProcShowSuffix=v; refresh() end,
         },
@@ -1557,7 +1606,14 @@ do
     local _origRegister = PT.RegisterDeck
     function PT.RegisterDeck(def)
         _origRegister(def)
-        if ArcUI_ProcTrackerDB then
+        -- Must be PT.SavedVarsLoaded(), NOT `if ArcUI_ProcTrackerDB then`: GetDB()
+        -- fabricates that global, so a deck that reads its saved settings while
+        -- building its registration table makes the old check pass with an EMPTY
+        -- table -- and the bar gets built at BAR_DEFAULTS (0, 130) instead of the
+        -- saved position. Nothing re-anchors it afterwards, so it stays there.
+        -- Decks registering before this point get their bar built by the
+        -- ADDON_LOADED sweep below.
+        if PT.SavedVarsLoaded and PT.SavedVarsLoaded() then
             local entry = PT.GetDeck(def.id)
             if entry and not entry.barWidget then BuildBarWidget(entry) end
         end
@@ -1565,6 +1621,66 @@ do
 end
 
 PT.BuildBarOptionsGroup = BuildBarOptionsGroup
+
+-- ── Position drift guard ─────────────────────────────────────────────────────
+-- The bar's anchor is written in exactly three places: BuildBarWidget, OnDragStop
+-- and the X/Y option fields. NOTHING re-applies it afterwards, so if the frame is
+-- ever anchored with anything other than the saved value it stays wrong until the
+-- user drags it back by hand. Arc hit exactly that once on a /reload, and a single
+-- unreproduced event is not enough to pin a cause.
+--
+-- So instead of trusting one theory, re-assert the saved position once per world
+-- entry -- a point where SavedVariables are definitely real -- and record it when
+-- a correction was actually needed. If this never fires, the bar was never wrong.
+-- If it does, ArcUI_ProcTrackerDB.posDrift says what it found, which is the
+-- evidence a root-cause fix needs.
+local driftWarned = {}   -- session-only: one warning per deck, see below
+
+function PT.ReassertBarPosition(entry)
+    local bw = entry and entry.barWidget
+    if not bw then return end
+    local db = BarDB(entry.id)
+    local wantX, wantY = db.barX or 0, db.barY or 0
+    local point, _, relPoint, gotX, gotY = bw:GetPoint()
+    gotX, gotY = gotX or 0, gotY or 0
+    if point == "CENTER" and relPoint == "CENTER"
+       and math.abs(gotX - wantX) < 0.5 and math.abs(gotY - wantY) < 0.5 then
+        return
+    end
+    bw:ClearAllPoints()
+    bw:SetScale(db.barScale or 1.0)
+    bw:SetPoint("CENTER", UIParent, "CENTER", wantX, wantY)
+
+    local root = GetDB()
+    root.posDrift = root.posDrift or {}
+    root.posDrift[entry.id] = {
+        gotPoint = tostring(point), gotRelPoint = tostring(relPoint),
+        gotX = gotX, gotY = gotY, wantX = wantX, wantY = wantY,
+        scale = db.barScale or 1.0, when = date("%Y-%m-%d %H:%M:%S"),
+    }
+    -- Warn ONCE per session per deck. A saved position that sits off-screen is
+    -- permanently mismatched -- SetClampedToScreen keeps shoving the frame back
+    -- while the saved value stays where it was typed -- so an unconditional print
+    -- here would fire on every world entry forever. Still correct it every time,
+    -- and still overwrite posDrift so the record stays current; just say so once.
+    if not driftWarned[entry.id] then
+        driftWarned[entry.id] = true
+        print(("|cffFF4444ProcTracker:|r %s bar was at (%.0f, %.0f), restored to (%.0f, %.0f). Please report this."):
+            format(entry.id, gotX, gotY, wantX, wantY))
+    end
+end
+
+local driftFrame = CreateFrame("Frame")
+driftFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+driftFrame:SetScript("OnEvent", function()
+    -- After the login/reload settle, so anything that anchors late has already run.
+    C_Timer.After(2.0, function()
+        if not PT.ForEachDeck then return end
+        PT.ForEachDeck(function(entry)
+            if entry.barWidget then PT.ReassertBarPosition(entry) end
+        end)
+    end)
+end)
 
 local bootFrame = CreateFrame("Frame")
 bootFrame:RegisterEvent("ADDON_LOADED")

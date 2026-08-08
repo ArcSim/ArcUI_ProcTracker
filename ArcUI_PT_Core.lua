@@ -23,6 +23,25 @@ local function GetDB()
     return ArcUI_ProcTrackerDB
 end
 
+-- Has WoW actually handed us our SavedVariables yet?
+--
+-- Do NOT test `if ArcUI_ProcTrackerDB then` for this. GetDB() FABRICATES that
+-- global on first touch, and decks touch it before registering: DWDeck's
+-- registration table evaluates ForceCDMSetting() -> PT.GetIconDB("dw") ->
+-- GetDB() while building the table it passes to PT.RegisterDeck, so the global
+-- exists but is EMPTY by the time the build guards run. Both guards then see a
+-- truthy value and build the icon and bar out of ICON_DEFAULTS / BAR_DEFAULTS,
+-- i.e. at the DEFAULT position. WoW later replaces the global with the real
+-- saved table, but nothing ever re-anchors an existing widget -- SetPoint on the
+-- bar happens only in BuildBarWidget and the drag/options handlers -- so it
+-- stays wherever the defaults put it. That is the "my bar reset its position on
+-- reload" bug, and the `not entry.widget` duplicate guard added in 1.1.3 is what
+-- stopped the later correct-position rebuild from papering over it.
+--
+-- Gate every widget build on this flag instead.
+local savedVarsLoaded = false
+function PT.SavedVarsLoaded() return savedVarsLoaded end
+
 local ICON_DEFAULTS = {
     posX=0, posY=180, iconW=48, iconH=48, iconScale=1.0, frameStrata="HIGH", frameLevel=5, showViolations=false, desaturateEmpty=false, violOffX=0, violOffY=-20, violSize=12, violR=1, violG=0.2, violB=0.2,
     deckOffX=0, deckOffY=0,  deckSize=19,
@@ -193,6 +212,21 @@ local AceConfigDialog   = LibStub("AceConfigDialog-3.0", true)
 local AceConfigRegistry = LibStub("AceConfigRegistry-3.0", true)
 local PT_OPTIONS_NAME   = "ArcUI_ProcTracker_Options"
 
+-- Force the options panel to re-read function-valued names/descs.
+--
+-- Hits BOTH renderers on purpose. NotifyChange drives stock AceConfigDialog and,
+-- via the ConfigTableChange callback in OpenSkinnedOptions, the ArcSkin window
+-- too -- but that callback is only registered once the skinned window has been
+-- opened through that path. Calling skin:Refresh directly as well means a live
+-- status line updates regardless of which renderer is up or how it was opened.
+--
+-- Both calls are no-ops when the panel is closed.
+function PT.RefreshOptions()
+    if AceConfigRegistry then AceConfigRegistry:NotifyChange(PT_OPTIONS_NAME) end
+    local skin = LibStub and LibStub("ArcSkin-1.0", true)
+    if skin and skin.Refresh then skin:Refresh(PT_OPTIONS_NAME) end
+end
+
 -- ── Widget helpers ────────────────────────────────────────────────────────────
 local function ProcColor(db, procs, maxProcs)
     if db.procCountDown then
@@ -275,16 +309,32 @@ local function UpdateIcon(entry)
         end
     end
 
+    -- Optional per-deck text override. A tracker whose meaningful readout is not
+    -- a deck position (e.g. Soulburst, an escalating-chance proc where the useful
+    -- number is the CHANCE, not a card index) supplies GetDeckText/GetProcText and
+    -- formats its own string. Decks that do not define them are untouched.
+    local deckStr = tostring(pos) .. suffix
+    if entry.GetDeckText then
+        local s = entry.GetDeckText()
+        if s ~= nil then deckStr = s end
+    end
+
     PT.SetFontSafe(w._deckText, db.deckFont, db.deckSize)
     w._deckText:SetShadowOffset(1, -1); w._deckText:SetShadowColor(0, 0, 0, 1)
-    w._deckText:SetText(tostring(pos) .. suffix)
+    w._deckText:SetText(deckStr)
     w._deckText:SetTextColor(db.deckR, db.deckG, db.deckB)
     w._deckText:ClearAllPoints()
     w._deckText:SetPoint("CENTER", w._icon, "CENTER", db.deckOffX, db.deckOffY)
 
+    local procStr = tostring(procDisp) .. procSuffix
+    if entry.GetProcText then
+        local s = entry.GetProcText()
+        if s ~= nil then procStr = s end
+    end
+
     PT.SetFontSafe(w._procText, db.procFont, db.procSize)
     w._procText:SetShadowOffset(1, -1); w._procText:SetShadowColor(0, 0, 0, 1)
-    w._procText:SetText(tostring(procDisp) .. procSuffix)
+    w._procText:SetText(procStr)
     w._procText:SetTextColor(r, g, b)
     w._procText:ClearAllPoints()
     w._procText:SetPoint("CENTER", w._icon, "CENTER", db.procOffX, db.procOffY)
@@ -590,6 +640,24 @@ local function BuildDeckOptionsGroup(entry)
     end
     local function iconHidden() return not deckEnabled() end
 
+    -- ── Per-deck option overrides ────────────────────────────────────────────
+    -- Every label here was written for a DECK: "Deck Position", "All Procs Used",
+    -- "/250 suffix". A tracker that is not a deck (Soulburst is an escalating
+    -- proc chance) inherits wording that describes nothing it does, and options
+    -- that are wired to fields its display overrides ignore.
+    --
+    -- entry.ui     renames a label or description
+    -- entry.uiHide removes an option the deck's display makes inert
+    --
+    -- Both are optional; every existing deck is untouched.
+    local UI     = entry.ui     or {}
+    local UIHIDE = entry.uiHide or {}
+    local function L(key, default) return UI[key] or default end
+    -- hidden() that also respects the deck's own opt-out
+    local function H(key)
+        return function() return iconHidden() or UIHIDE[key] == true end
+    end
+
     return {
         type = "group",
         name = entry.name,
@@ -614,6 +682,53 @@ local function BuildDeckOptionsGroup(entry)
                     if w then if v then w:Show() else w:Hide() end end
                 end,
             },
+
+            -- Optional per-deck load condition. A deck that is only meaningful
+            -- under some external requirement (Soulburst needs the MID2 2-piece)
+            -- supplies entry.loadCondition; decks without one never see this.
+            loadCondition = {
+                type  = "toggle",
+                -- Never empty even when hidden: AceConfig renders a nameless
+                -- control badly if the hidden check is ever bypassed.
+                name  = (entry.loadCondition and entry.loadCondition.name) or "Load Condition",
+                desc  = (entry.loadCondition and entry.loadCondition.desc) or "",
+                order = o(), width = "full",
+                hidden = function() return entry.loadCondition == nil end,
+                -- A deck may declare defaultOn: a load condition that is the
+                -- sensible default for that deck (Soulburst is meaningless
+                -- without the set bonus it tracks). nil means "never touched",
+                -- so it falls through to the deck's preference.
+                get   = function()
+                    local v = db().requireLoad
+                    if v == nil then
+                        return (entry.loadCondition and entry.loadCondition.defaultOn) == true
+                    end
+                    return v == true
+                end,
+                set   = function(_, v)
+                    db().requireLoad = v
+                    if entry.loadCondition and entry.loadCondition.Apply then
+                        entry.loadCondition.Apply()
+                    end
+                end,
+            },
+            loadConditionStatus = {
+                type  = "description",
+                name  = function()
+                    local lc = entry.loadCondition
+                    if not lc or not lc.Status then return "" end
+                    return lc.Status()
+                end,
+                order = o(), width = "full",
+                hidden = function()
+                    local lc = entry.loadCondition
+                    if lc == nil then return true end
+                    local v = db().requireLoad
+                    if v == nil then v = lc.defaultOn == true end
+                    return v ~= true
+                end,
+            },
+
             lockPosition = {
                 type  = "toggle", name = "Lock Position",
                 desc  = "Prevent the icon from being dragged. When locked the frame is click-through.",
@@ -860,26 +975,31 @@ local function BuildDeckOptionsGroup(entry)
 
             -- ── DECK POSITION TEXT ────────────────────────────────────────────
             deckTextHeader = {
-                type = "header", name = "Deck Position Text", order = o(),
+                type = "header", name = L("deckTextHeader", "Deck Position Text"), order = o(),
                 hidden = iconHidden,
+            },
+            deckTextNote = {
+                type = "description", name = L("deckTextNote", ""), order = o(),
+                hidden = function() return iconHidden() or L("deckTextNote", "") == "" end,
             },
             countDown = {
                 type  = "toggle", name = "Count Down  (600 to 0)",
                 order = o(), width = "half",
-                hidden = iconHidden,
+                hidden = H("countDown"),
                 get   = function() return db().countDown end,
                 set   = function(_, v) db().countDown = v; refresh() end,
             },
             showDeckSuffix = {
                 type  = "toggle", name = "Show /" .. entry.deckSize .. " suffix",
                 order = o(), width = "half",
-                hidden = iconHidden,
+                hidden = H("showDeckSuffix"),
                 get   = function() return db().showDeckSuffix end,
                 set   = function(_, v) db().showDeckSuffix = v; refresh() end,
             },
             deckFont = {
                 type = "select", name = "Font",
-                desc = "Font for the deck position text. Includes fonts shared by other addons, such as ArcUI.",
+                desc = L("deckFontDesc",
+                    "Font for the deck position text. Includes fonts shared by other addons, such as ArcUI."),
                 order = o(), width = 1.2,
                 dialogControl = "LSM30_Font",
                 hidden = function() return iconHidden() or not PT.HasSharedMedia() end,
@@ -945,26 +1065,31 @@ local function BuildDeckOptionsGroup(entry)
 
             -- ── PROC COUNT TEXT ───────────────────────────────────────────────
             procTextHeader = {
-                type = "header", name = "Proc Count", order = o(),
+                type = "header", name = L("procTextHeader", "Proc Count"), order = o(),
                 hidden = iconHidden,
+            },
+            procTextNote = {
+                type = "description", name = L("procTextNote", ""), order = o(),
+                hidden = function() return iconHidden() or L("procTextNote", "") == "" end,
             },
             procCountDown = {
                 type  = "toggle", name = "Count Down  (3 to 0)",
                 order = o(), width = "half",
-                hidden = iconHidden,
+                hidden = H("procCountDown"),
                 get   = function() return db().procCountDown end,
                 set   = function(_, v) db().procCountDown = v; refresh() end,
             },
             showProcSuffix = {
                 type  = "toggle", name = "Show /" .. entry.procs .. " suffix",
                 order = o(), width = "half",
-                hidden = iconHidden,
+                hidden = H("showProcSuffix"),
                 get   = function() return db().showProcSuffix end,
                 set   = function(_, v) db().showProcSuffix = v; refresh() end,
             },
             procFont = {
                 type = "select", name = "Font",
-                desc = "Font for the proc count text. Includes fonts shared by other addons, such as ArcUI.",
+                desc = L("procFontDesc",
+                    "Font for the proc count text. Includes fonts shared by other addons, such as ArcUI."),
                 order = o(), width = 1.2,
                 dialogControl = "LSM30_Font",
                 hidden = function() return iconHidden() or not PT.HasSharedMedia() end,
@@ -1021,30 +1146,30 @@ local function BuildDeckOptionsGroup(entry)
 
             -- proc count colors flow in the same "Proc Count" section
             emptyColor = {
-                type = "color", name = "All Procs Available",
-                desc  = "No procs used this deck",
+                type = "color", name = L("emptyColorName", "All Procs Available"),
+                desc  = L("emptyColorDesc", "No procs used this deck"),
                 order = o(), width = "full", hasAlpha = false,
-                hidden = iconHidden,
+                hidden = H("emptyColor"),
                 get  = function() return db().emptyR, db().emptyG, db().emptyB end,
                 set  = function(_, r, g, b)
                     local d = db(); d.emptyR=r; d.emptyG=g; d.emptyB=b; refresh()
                 end,
             },
             halfColor = {
-                type = "color", name = "Procs Partially Used",
-                desc  = "Some but not all procs used",
+                type = "color", name = L("halfColorName", "Procs Partially Used"),
+                desc  = L("halfColorDesc", "Some but not all procs used"),
                 order = o(), width = "full", hasAlpha = false,
-                hidden = iconHidden,
+                hidden = H("halfColor"),
                 get  = function() return db().halfR, db().halfG, db().halfB end,
                 set  = function(_, r, g, b)
                     local d = db(); d.halfR=r; d.halfG=g; d.halfB=b; refresh()
                 end,
             },
             fullColor = {
-                type = "color", name = "All Procs Used",
-                desc  = "All procs consumed this deck",
+                type = "color", name = L("fullColorName", "All Procs Used"),
+                desc  = L("fullColorDesc", "All procs consumed this deck"),
                 order = o(), width = "full", hasAlpha = false,
-                hidden = iconHidden,
+                hidden = H("fullColor"),
                 get  = function() return db().fullR, db().fullG, db().fullB end,
                 set  = function(_, r, g, b)
                     local d = db(); d.fullR=r; d.fullG=g; d.fullB=b; refresh()
@@ -1057,7 +1182,7 @@ local function BuildDeckOptionsGroup(entry)
                 type  = "toggle", name = "Show Violation Counter",
                 desc  = "Shows a count of decks that had wrong proc count. Disabled by default.",
                 order = o(), width = "full",
-                hidden = iconHidden,
+                hidden = H("showViolations"),
                 get   = function() return db().showViolations == true end,
                 set   = function(_, v)
                     db().showViolations = v
@@ -1568,8 +1693,10 @@ function PT.RegisterDeck(def)
     def.optPanel = nil
     registry[#registry+1] = def
     registryMap[def.id]   = def
-    -- If ADDON_LOADED already fired, build the widget immediately
-    if ArcUI_ProcTrackerDB then
+    -- If SavedVariables are already in, build the widget immediately.
+    -- Must be savedVarsLoaded, NOT `if ArcUI_ProcTrackerDB then` -- see the note
+    -- on savedVarsLoaded above.
+    if savedVarsLoaded then
         BuildIconWidget(def)
         if def.OnEnable then def.OnEnable() end
         optionsRegistered = false  -- refresh options so new tab appears
@@ -1701,6 +1828,9 @@ watchFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
     if event == "ADDON_LOADED" and a1 == "ArcUI_ProcTracker" then
         ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
+        -- Set BEFORE any build below: this is the first moment the saved table is
+        -- guaranteed real rather than one GetDB() fabricated for us.
+        savedVarsLoaded = true
         -- Build icons for all registered decks.
         -- The `not entry.widget` guard is REQUIRED, not defensive. SavedVariables
         -- are populated before ADDON_LOADED fires, so a deck file that manages to
@@ -1729,7 +1859,7 @@ watchFrame:SetScript("OnEvent", function(_, event, a1, a2)
             for _, fn in ipairs(PT.OnEnterWorld) do fn() end
             -- Build widgets for any newly registered decks
             for _, entry in ipairs(registry) do
-                if not entry.widget and ArcUI_ProcTrackerDB then
+                if not entry.widget and savedVarsLoaded then
                     BuildIconWidget(entry)
                     if entry.OnEnable then entry.OnEnable() end
                 end
@@ -2070,6 +2200,23 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
             C_Timer.After(0.1, function() ArcUI_PT_SUDebug.Export() end)
         else
             ArcUI_PT_SUDebug.Toggle()
+        end
+        return
+    end
+
+    -- /pt sbdebug → toggle Soulburst (Devourer 2pc) debugger
+    -- /pt sbdebug export → open window and export
+    if arg == "sbdebug" or arg:sub(1,8) == "sbdebug " then
+        if not ArcUI_PT_SBDebug then
+            print("|cffFF4444ProcTracker:|r SBDebug not loaded")
+            return
+        end
+        local sub = arg:sub(9)
+        if sub == "export" then
+            if not ArcUI_PT_SBDebug.IsEnabled() then ArcUI_PT_SBDebug.Toggle() end
+            C_Timer.After(0.1, function() ArcUI_PT_SBDebug.Export() end)
+        else
+            ArcUI_PT_SBDebug.Toggle()
         end
         return
     end

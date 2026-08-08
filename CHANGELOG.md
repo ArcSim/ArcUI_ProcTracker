@@ -1,5 +1,11 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.1.4
+- **New Soulburst Tracking (Demon Hunter)** — Tracks the Devourer two-piece set bonus for Midnight Season 2. The icon shows the chance your next Reap, Cull or Eradicate procs Soulburst: it starts at 7%, climbs each time a harvest fails to proc, and resets when one lands. Only harvests that consume 4 or more Soul Fragments count, matching the set bonus.
+- **Only Show With 2-Piece** — The Soulburst tracker hides its icon and bar unless you have the set equipped. On by default, and can be turned off in the Widget section if you want it visible anyway. Tracking keeps running either way, so swapping gear never leaves the counter wrong.
+- **Bar Scale Fix** — Fixed bars briefly appearing at the wrong size and slightly off position until their first update.
+- **Free Text Position Fix** — Fixed bar texts set to Free positioning jumping to a different spot after a reload.
+
 ## 1.1.3
 - **New Storm Unleashed Deck** — Tracks the Crash Lightning reset proc for Enhancement: 5 procs per 250 Maelstrom Weapon spent, with its own icon and bar.
 - **Doom Winds Without the Cooldown Manager** — With Rolling Thunder or Feral Spirit talented, the Doom Winds deck now tracks procs on its own and no longer needs the Cooldown Manager set up. The Behavior tab tells you which talent is providing the signal.
