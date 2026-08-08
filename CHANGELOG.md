@@ -1,5 +1,8 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.1.5
+- **Classic Options Panel Fix** — Fixed the Classic Options Panel refusing to open with an "unknown parameter" error. The panel has been broken since 1.1.0 for anyone who switched to it under General; the default Arc options window was never affected.
+
 ## 1.1.4
 - **New Soulburst Tracking (Demon Hunter)** — Tracks the Devourer two-piece set bonus for Midnight Season 2. The icon shows the chance your next Reap, Cull or Eradicate procs Soulburst: it starts at 7%, climbs each time a harvest fails to proc, and resets when one lands. Only harvests that consume 4 or more Soul Fragments count, matching the set bonus.
 - **Only Show With 2-Piece** — The Soulburst tracker hides its icon and bar unless you have the set equipped. On by default, and can be turned off in the Widget section if you want it visible anyway. Tracking keeps running either way, so swapping gear never leaves the counter wrong.

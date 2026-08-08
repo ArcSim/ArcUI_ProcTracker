@@ -2,7 +2,7 @@
 ## Title: ArcUI ProcTracker
 ## Notes: Deck proc tracking — DW, Tempest, DRE, and more. /pt for options.
 ## Author: Arc
-## Version: 1.1.4
+## Version: 1.1.5
 ## SavedVariables: ArcUI_ProcTrackerDB
 ## X-Curse-Project-ID: 1516247
 

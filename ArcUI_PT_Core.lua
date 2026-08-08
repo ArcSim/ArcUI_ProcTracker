@@ -1565,9 +1565,18 @@ local function BuildMasterOptionsTable()
     }
 end
 
+-- skipValidation is REQUIRED, not an optimization. Our section headers carry
+-- `arcGroup`, a custom key ArcSkin reads to bucket consecutive sections into
+-- tabs. ArcSkin gets the table handed to it directly so it never cares, but the
+-- Classic panel goes through AceConfigDialog -> AceConfigRegistry, whose
+-- validator rejects ANY key it does not know and throws "arcGroup: unknown
+-- parameter", killing the panel outright. There is no public way to whitelist a
+-- custom key -- basekeys is a local upvalue -- so the supported escape is this
+-- flag. AceConfigDialog itself ignores keys it does not recognize, so the
+-- Classic panel renders fine without it.
 local function RefreshMasterOptions()
     if not AceConfig or not AceConfigDialog then return end
-    AceConfig:RegisterOptionsTable(PT_OPTIONS_NAME, BuildMasterOptionsTable())
+    AceConfig:RegisterOptionsTable(PT_OPTIONS_NAME, BuildMasterOptionsTable(), true)
     optionsRegistered = true
 end
 
