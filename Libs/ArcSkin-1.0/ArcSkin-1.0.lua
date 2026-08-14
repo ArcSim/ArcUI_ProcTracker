@@ -17,7 +17,7 @@
 -- Consumers: ArcUI_ProcTracker (first), ArcUI (Arc 2.0), future Arc
 -- addons. No pcall. Zero idle CPU (everything click/event driven).
 -- ===================================================================
-local MAJOR, MINOR = "ArcSkin-1.0", 2
+local MAJOR, MINOR = "ArcSkin-1.0", 5
 local AS = LibStub:NewLibrary(MAJOR, MINOR)
 if not AS then return end
 
@@ -28,6 +28,7 @@ AS.COL = {
     well    = { 0.039, 0.067, 0.125 },
     line    = { 0.114, 0.165, 0.247 },
     line2   = { 0.165, 0.231, 0.341 },
+    box     = { 0.055, 0.078, 0.130 },  -- section container fill, a step up from bg
     ink     = { 0.950, 0.970, 1.000 },  -- near-white primary labels
     dim     = { 0.700, 0.780, 0.880 },  -- readable secondary
     faint   = { 0.550, 0.650, 0.780 },
@@ -36,7 +37,7 @@ AS.COL = {
 }
 local COL = AS.COL
 local WHITE = "Interface\\Buttons\\WHITE8X8"
-local ROW_H = 26
+local ROW_H = 24   -- matches the locked KA template (was 26)
 
 local function Skin(f, bg, borderCol)
     f:SetBackdrop({ bgFile = WHITE, edgeFile = WHITE, edgeSize = 1 })
@@ -143,18 +144,46 @@ local function MakeSwatch(parent, w, h)
     return b
 end
 
+local BTN_FILL   = { 0.110, 0.161, 0.243 }   -- KA navy-blue button fill
+local BTN_BORDER = { 0.298, 0.400, 0.549 }   -- steel border
+local BTN_HOVER  = { 0.150, 0.205, 0.295 }   -- lighter on hover
 local function MakeSmallButton(parent, label, w)
     local b = CreateFrame("Button", nil, parent, "BackdropTemplate")
-    b:SetSize(w or 92, 20)
-    Skin(b, COL.well)
+    b:SetSize(w or 92, 22)
+    Skin(b, BTN_FILL, BTN_BORDER)
     b.fs = b:CreateFontString(nil, "OVERLAY")
     b.fs:SetFont(STANDARD_TEXT_FONT, 11, "")
     b.fs:SetPoint("CENTER")
     b.fs:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3])
     b.fs:SetText(label or "")
-    b:SetScript("OnEnter", function() b:SetBackdropBorderColor(COL.arcDeep[1], COL.arcDeep[2], COL.arcDeep[3], 1) end)
-    b:SetScript("OnLeave", function() b:SetBackdropBorderColor(COL.line[1], COL.line[2], COL.line[3], 1) end)
+    b:SetScript("OnEnter", function()
+        b:SetBackdropColor(BTN_HOVER[1], BTN_HOVER[2], BTN_HOVER[3], 1)
+        b:SetBackdropBorderColor(COL.arc[1], COL.arc[2], COL.arc[3], 1)
+    end)
+    b:SetScript("OnLeave", function()
+        b:SetBackdropColor(BTN_FILL[1], BTN_FILL[2], BTN_FILL[3], 1)
+        b:SetBackdropBorderColor(BTN_BORDER[1], BTN_BORDER[2], BTN_BORDER[3], 1)
+    end)
     return b
+end
+
+-- WoW-style square checkbox (the Arc theme toggle): navy box + a cyan checkmark when on.
+-- Same as Kick Assist: constant box, clean "checkmark-minimal" atlas desaturated + tinted cyan,
+-- slightly overhanging the box, with a hover glow.
+local function MakeCheckbox(parent)
+    local c = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    c:SetSize(18, 18); Skin(c, COL.well, COL.line2)
+    c.check = c:CreateTexture(nil, "OVERLAY")
+    c.check:SetAtlas("checkmark-minimal"); c.check:SetDesaturated(true)
+    c.check:SetVertexColor(COL.arc[1], COL.arc[2], COL.arc[3], 1)
+    c.check:SetSize(20, 20); c.check:SetPoint("CENTER", 0, 0); c.check:Hide()
+    c._glow = c:CreateTexture(nil, "ARTWORK")
+    c._glow:SetTexture("Interface\\Buttons\\ButtonHilight-Square"); c._glow:SetBlendMode("ADD")
+    c._glow:SetVertexColor(COL.arc[1], COL.arc[2], COL.arc[3], 0.55)
+    c._glow:SetPoint("TOPLEFT", -3, 3); c._glow:SetPoint("BOTTOMRIGHT", 3, -3); c._glow:Hide()
+    function c:SetHover(on) self._glow:SetShown(on and true or false) end
+    function c:SetOn(on) self.check:SetShown(on and true or false) end
+    return c
 end
 
 -- tooltip attach (desc -> GameTooltip on hover, template-consistent)
@@ -271,13 +300,25 @@ end
 -- toggle: pill switch right, whole row clickable
 builders.toggle = function(win)
     local row = NewRow(win, true)
-    row.sw = MakeSwitch(row)
-    row.sw:SetPoint("RIGHT", -12, 0)
-    row.label:SetPoint("RIGHT", row.sw, "LEFT", -8, 0)
-    local function flip() if row.onFlip then row.onFlip() end end
+    row.sw = MakeCheckbox(row)
+    -- Provisional placement, label-relative. renderRows then lines every checkbox
+    -- in the block up on ONE shared column just past the widest label: pinned to
+    -- the far right (the old behaviour) the box drifted away from the word it
+    -- belongs to, which is exactly what the locked Arc template forbids.
+    row.sw:SetPoint("LEFT", row.label, "RIGHT", 14, 0)
+    row._colLabel, row._colCtrl = row.label, row.sw
+    local function flip()
+        local wasOn = row.sw.check:IsShown()
+        if row.onFlip then row.onFlip() end
+        PlaySound((not wasOn) and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF)
+    end
     row.sw:SetScript("OnClick", flip)
     row:EnableMouse(true)
     row:SetScript("OnMouseUp", flip)
+    row:HookScript("OnEnter", function() row.sw:SetHover(true) end)
+    row:HookScript("OnLeave", function() row.sw:SetHover(false) end)
+    row.sw:HookScript("OnEnter", function() row.sw:SetHover(true) end)
+    row.sw:HookScript("OnLeave", function() row.sw:SetHover(false) end)
     AttachTip(row, function() return row.label:GetText() end, function() return row.tip end)
     return row
 end
@@ -664,6 +705,7 @@ local function renderRows(win, entries, xL, xR, y0)
     local stripeN = 0
     local curCol = nil     -- nil = full width, "L"/"R" = the pair columns
     local lineRows = nil   -- rows of the visual line being assembled
+    local colRows = {}     -- toggle rows sharing one control column (applied below)
 
     -- stripes are BACK (Arc's call): one stripe per visual LINE, shared by
     -- both columns of a pair, restarting under each section
@@ -757,6 +799,9 @@ local function renderRows(win, entries, xL, xR, y0)
                     win:Rerender()
                 end
                 place(row, ROW_H)
+                -- full-width rows only: a half-width pair column is a different
+                -- width, so it must not be measured against the full-width labels
+                if curCol == nil then colRows[#colRows + 1] = row end
 
             elseif otype == "range" then
                 local row = acquire(win, "range")
@@ -884,6 +929,34 @@ local function renderRows(win, entries, xL, xR, y0)
             curCol = nil; renderOne(e)
         end
     end
+
+    -- THE TOGGLE COLUMN. Measured after the loop because a label's width is only
+    -- known once its text is set. Every checkbox in this block moves to one shared
+    -- x just past the longest label, so the column is uniform instead of ragged
+    -- (and near its label instead of pinned to the far edge).
+    if #colRows > 0 then
+        local widest = 0
+        for i = 1, #colRows do
+            local fs = colRows[i]._colLabel
+            -- unbounded: GetStringWidth reports the ALREADY-TRUNCATED width, which
+            -- would feed a too-small column back in on the next render
+            local w = (fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth())
+                   or fs:GetStringWidth() or 0
+            if w > widest then widest = w end
+        end
+        local col = 12 + widest + 16
+        local cap = rowW - 34               -- never shove the box off the right edge
+        if col > cap then col = math.max(12, cap) end
+        for i = 1, #colRows do
+            local r = colRows[i]
+            r._colCtrl:ClearAllPoints()
+            r._colCtrl:SetPoint("LEFT", r, "LEFT", col, 0)
+            -- Bound the label at the column so an over-long name ellipsizes instead
+            -- of running underneath the box. Safe to do AFTER the control is anchored
+            -- to the row: label and control both hang off the row, so no anchor cycle.
+            r._colLabel:SetPoint("RIGHT", r, "LEFT", col - 6, 0)
+        end
+    end
     return y
 end
 
@@ -891,7 +964,9 @@ end
 -- above a bordered darker box that the section's rows sit inside
 builders.box = function(win)
     local f = CreateFrame("Frame", nil, win.content, "BackdropTemplate")
-    Skin(f, COL.bg, COL.line)
+    -- COL.box, not COL.bg: the container has to sit a step ABOVE the window body,
+    -- which is what makes a boxed section read as a group instead of an outline.
+    Skin(f, COL.box, COL.line)
     return f
 end
 
@@ -1005,6 +1080,31 @@ local function groupTabs(args)
 end
 
 -- ── window construction ─────────────────────────────────────────────
+-- Arc community Discord (shared across all Arc addons). Addons can't open URLs, so the
+-- button shows a small copy popup with the link selected for Ctrl+C.
+local ARC_DISCORD = "https://discord.gg/yMZmnFjUTd"
+local BLURPLE = { 0.345, 0.396, 0.949 }   -- #5865F2
+local discordCopy
+local function ShowDiscordCopy(anchor)
+    if not discordCopy then
+        local d = CreateFrame("Frame", "ArcSkinDiscordCopy", UIParent, "BackdropTemplate")
+        d:SetSize(300, 70); d:SetFrameStrata("FULLSCREEN_DIALOG"); d:SetToplevel(true)
+        Skin(d, COL.panel, COL.arc)
+        local t = d:CreateFontString(nil, "OVERLAY"); t:SetFont(STANDARD_TEXT_FONT, 12, ""); t:SetPoint("TOP", 0, -10)
+        t:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3]); t:SetText("Press Ctrl+C to copy, then open it in your browser")
+        local box = CreateFrame("EditBox", nil, d, "BackdropTemplate"); box:SetSize(272, 22); box:SetPoint("TOP", 0, -32); Skin(box, COL.well)
+        box:SetFont(STANDARD_TEXT_FONT, 12, ""); box:SetTextInsets(6, 6, 0, 0); box:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3]); box:SetAutoFocus(false)
+        box:SetScript("OnEscapePressed", function() d:Hide() end)
+        box:SetScript("OnEnterPressed", function() d:Hide() end)
+        box:SetScript("OnEditFocusLost", function() d:Hide() end)
+        tinsert(UISpecialFrames, "ArcSkinDiscordCopy")
+        d.box = box; discordCopy = d
+    end
+    discordCopy:ClearAllPoints(); discordCopy:SetPoint("CENTER", anchor or UIParent, "CENTER", 0, 0)
+    discordCopy:Show(); discordCopy:Raise()
+    discordCopy.box:SetText(ARC_DISCORD); discordCopy.box:SetFocus(); discordCopy.box:HighlightText()
+end
+
 local function BuildWindow(appName, opts)
     local p = CreateFrame("Frame", "ArcSkin_" .. appName:gsub("[^%w]", ""), UIParent, "BackdropTemplate")
     p:SetSize(opts.width or 500, opts.height or 620)
@@ -1066,6 +1166,25 @@ local function BuildWindow(appName, opts)
         p:StopMovingOrSizing()
         if p.OnResized then p.OnResized(p) end
     end)
+
+    -- footer: Arc community Discord (bottom-left; clear of the resize grip)
+    local dline = p:CreateTexture(nil, "ARTWORK"); dline:SetTexture(WHITE)
+    dline:SetVertexColor(COL.line[1], COL.line[2], COL.line[3], 1)
+    dline:SetPoint("BOTTOMLEFT", 10, 30); dline:SetPoint("BOTTOMRIGHT", -10, 30); dline:SetHeight(1)
+    local db = CreateFrame("Button", nil, p, "BackdropTemplate"); db:SetSize(84, 20); Skin(db, COL.well)
+    db:SetPoint("BOTTOMLEFT", 10, 7)
+    local dfs = db:CreateFontString(nil, "OVERLAY"); dfs:SetFont(STANDARD_TEXT_FONT, 11, "")
+    dfs:SetPoint("CENTER"); dfs:SetText("|cff7289DADiscord|r")
+    db:SetScript("OnEnter", function()
+        db:SetBackdropBorderColor(BLURPLE[1], BLURPLE[2], BLURPLE[3], 1)
+        GameTooltip:SetOwner(db, "ANCHOR_TOP"); GameTooltip:AddLine("Join the Arc UI Discord", 1, 1, 1)
+        GameTooltip:AddLine("Questions, help, and updates", 0.7, 0.7, 0.7); GameTooltip:Show()
+    end)
+    db:SetScript("OnLeave", function() db:SetBackdropBorderColor(COL.line[1], COL.line[2], COL.line[3], 1); GameTooltip:Hide() end)
+    db:SetScript("OnClick", function() ShowDiscordCopy(p) end)
+    local dhint = p:CreateFontString(nil, "OVERLAY"); dhint:SetFont(STANDARD_TEXT_FONT, 10, "")
+    dhint:SetPoint("LEFT", db, "RIGHT", 8, 0); dhint:SetTextColor(COL.dim[1], COL.dim[2], COL.dim[3])
+    dhint:SetText("Questions or help? Join the Arc UI Discord")
 
     tinsert(UISpecialFrames, p:GetName())
     p:Hide()
@@ -1221,7 +1340,7 @@ local function renderWindow(win)
     end
     win.page:ClearAllPoints()
     win.page:SetPoint("TOPLEFT", win.frame, "TOPLEFT", 10, -yOff - 6)
-    win.page:SetPoint("BOTTOMRIGHT", win.frame, "BOTTOMRIGHT", -10, 10)
+    win.page:SetPoint("BOTTOMRIGHT", win.frame, "BOTTOMRIGHT", -10, 34)   -- leave room for the Discord footer
     win.page:SetBackdropBorderColor(0, 0, 0, 0)
 
     -- page body
@@ -1266,8 +1385,11 @@ local function renderWindow(win)
                 box:SetPoint("TOPRIGHT", win.content, "TOPRIGHT", -2, y)
                 box:SetBackdropBorderColor(COL.line[1], COL.line[2], COL.line[3], 0.5)
                 local boxTop = y
-                local yEnd = renderRows(win, s.items, 10, 10, y - 8)
-                box:SetHeight(boxTop - yEnd + 8)
+                -- Tight top pad (was 8 both sides). The old padding is what made a
+                -- section title look stranded above its first row; the locked KA
+                -- template hugs the box and lets the row height do the breathing.
+                local yEnd = renderRows(win, s.items, 10, 10, y - 2)
+                box:SetHeight(boxTop - yEnd + 3)
                 if twoCol then
                     local vd = acquire(win, "vdiv")
                     vd:SetWidth(1)

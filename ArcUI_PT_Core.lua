@@ -1574,9 +1574,16 @@ end
 -- custom key -- basekeys is a local upvalue -- so the supported escape is this
 -- flag. AceConfigDialog itself ignores keys it does not recognize, so the
 -- Classic panel renders fine without it.
+-- MIND THE API. The flag has to go to AceConfigREGISTRY, whose third argument is
+-- skipValidation. AceConfig-3.0's third argument is SLASHCMD, so the old
+-- `AceConfig:RegisterOptionsTable(name, tbl, true)` broke the Classic panel two
+-- ways at once: validation still ran (so arcGroup threw "unknown parameter"), and
+-- `true` was taken as a slash command, sending CreateChatCommand into
+-- LibStub("AceConsole-3.0") -- a library this addon does not load -- which threw
+-- outright. Net effect: /pt opened nothing for anyone on Classic Options.
 local function RefreshMasterOptions()
-    if not AceConfig or not AceConfigDialog then return end
-    AceConfig:RegisterOptionsTable(PT_OPTIONS_NAME, BuildMasterOptionsTable(), true)
+    if not AceConfigRegistry or not AceConfigDialog then return end
+    AceConfigRegistry:RegisterOptionsTable(PT_OPTIONS_NAME, BuildMasterOptionsTable(), true)
     optionsRegistered = true
 end
 
@@ -1633,7 +1640,7 @@ BuildOptionsPanel = function(entry)
         return
     end
 
-    if not AceConfig or not AceConfigDialog then
+    if not AceConfigRegistry or not AceConfigDialog then
         print("|cffFF4444ProcTracker:|r AceConfig not available")
         return
     end
@@ -2114,6 +2121,17 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
     arg = arg and arg:match("^%s*(.-)%s*$") or ""
 
     if arg == "" then
+        BuildOptionsPanel(registry[1])
+        return
+    end
+
+    -- /pt classic  -- switch options style WITHOUT the panel. The toggle for this
+    -- normally lives inside the panel, so if one style ever fails to open, the
+    -- setting that would fix it is unreachable. This is the way out.
+    if arg == "classic" or arg == "arc" then
+        ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
+        ArcUI_ProcTrackerDB.classicOptions = (arg == "classic")
+        print("|cffFFAA00ProcTracker|r options style: " .. (arg == "classic" and "Classic" or "Arc"))
         BuildOptionsPanel(registry[1])
         return
     end

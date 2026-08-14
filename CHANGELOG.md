@@ -1,5 +1,11 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.1.6
+- **Classic Options Panel Fix (for real this time)**: The fix in 1.1.5 did not work. Opening the settings window with the Classic Options Panel turned on still failed with a Lua error, so /pt did nothing. That is now genuinely fixed. If you have been unable to open your settings since 1.1.0, this is the one.
+- **New /pt classic and /pt arc commands**: Switch between the two options styles straight from chat. The toggle for it normally lives inside the settings window, which is no help when the window will not open, so this is the way out if you ever get stuck again.
+- **Options Panel Polish**: Toggles are now proper checkboxes and line up in a single column in each section instead of sitting out at the far edge, section groups read as raised panels, and the spacing is tighter so more fits on screen without scrolling. Buttons got a cleaner look to match.
+- **Discord Button**: The settings window now has a Discord button if you want help or want to report something.
+
 ## 1.1.5
 - **Classic Options Panel Fix** — Fixed the Classic Options Panel refusing to open with an "unknown parameter" error. The panel has been broken since 1.1.0 for anyone who switched to it under General; the default Arc options window was never affected.
 
