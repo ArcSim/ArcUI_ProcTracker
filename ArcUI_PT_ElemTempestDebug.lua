@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_ElemTempestDebug.lua
 -- Logs visibility/talent state at login + spellcast/proc timeline.
 

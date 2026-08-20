@@ -1,5 +1,8 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.1.7
+- **Fixed the addon breaking when another addon uses the same name internally**: ProcTracker kept its internals under a name so short that other addons could claim it too. When one did, ProcTracker lost track of itself and threw a stream of Lua errors, and the decks stopped working entirely. If you have had error spam since installing, or it never worked at all, this is the cause and it is fixed. Nothing on your end needs changing.
+
 ## 1.1.6
 - **Classic Options Panel Fix (for real this time)**: The fix in 1.1.5 did not work. Opening the settings window with the Classic Options Panel turned on still failed with a Lua error, so /pt did nothing. That is now genuinely fixed. If you have been unable to open your settings since 1.1.0, this is the one.
 - **New /pt classic and /pt arc commands**: Switch between the two options styles straight from chat. The toggle for it normally lives inside the settings window, which is no help when the window will not open, so this is the way out if you ever get stuck again.

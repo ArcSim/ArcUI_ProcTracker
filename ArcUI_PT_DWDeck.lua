@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_DWDeck.lua
 -- Doom Winds deck tracking.
 -- Detection: CDM frame hooks on cooldownID=82621. A proc is CDM calling

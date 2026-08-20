@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_StormUnleashedDeck.lua
 -- Storm Unleashed (Crash Lightning reset) deck tracking.
 --

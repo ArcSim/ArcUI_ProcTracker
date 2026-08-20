@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_Bar.lua
 -- Bar widget for ProcTracker decks.
 -- StatusBar fill, tick marks at exact proc positions, two independent text frames.

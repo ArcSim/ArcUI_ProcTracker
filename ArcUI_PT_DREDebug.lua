@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_DREDebug.lua
 -- DRE Ascendance deck debugger.
 -- Logs MSW consumes, SPELL_UPDATE_COOLDOWN events in window,

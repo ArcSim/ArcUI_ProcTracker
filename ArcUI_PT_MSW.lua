@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_MSW.lua
 -- Shared Maelstrom Weapon resource module.
 -- Single UNIT_AURA listener — zero duplication across deck modules.

@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_DWDebug.lua
 -- Doom Winds deck timeline debugger.
 -- Watches CDM frame aura hooks, MSW consumes, hard-cast buffer,

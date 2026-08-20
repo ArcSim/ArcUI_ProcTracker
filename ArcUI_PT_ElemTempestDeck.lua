@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_ElemTempestDeck.lua
 -- Tempest (Elemental) Maelstrom deck tracking.
 -- DETECTION RULE (mirrors Enhancement RULE1):

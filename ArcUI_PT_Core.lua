@@ -3,7 +3,14 @@
 -- No detection logic here. Decks register via PT.RegisterDeck().
 -- No pcall. Zero polling.
 
-PT = {}  -- global namespace, decks write into this
+-- PRIVATE namespace, NOT a global. This was `PT = {}` -- a bare two-letter global --
+-- so any other addon or WeakAura that assigned PT replaced this table, and every
+-- module's PT.<field> read went nil (the MSW.lua:141 error storm users reported).
+-- WoW hands every file in this addon the SAME table through `...`, and each file
+-- holds it as a LOCAL captured at load, so an outside PT can no longer reach us.
+-- Every ArcUI_PT_*.lua file must therefore start with `local ADDON, PT = ...`.
+local ADDON, PT = ...
+_G.ArcUI_PT = PT   -- non-colliding handle, so /run ArcUI_PT.foo still works
 
 local InitMinimapButton  -- forward declare
 local BuildOptionsPanel   -- forward declare

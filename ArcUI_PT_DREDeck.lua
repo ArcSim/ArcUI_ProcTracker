@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_DREDeck.lua
 -- Deeply Rooted Elements (DRE) Ascendance proc tracking.
 -- DRE procs Ascendance from MSW spends — tracked via SPELL_UPDATE_COOLDOWN.

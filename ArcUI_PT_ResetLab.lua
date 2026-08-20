@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_ResetLab.lua
 -- /pt resetlab -- combat-entry probe for the in-game deck RESET question.
 --

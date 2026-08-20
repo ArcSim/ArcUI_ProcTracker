@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_SoulburstDeck.lua
 -- Devourer MID2 2pc "Soulburst" tracking. DEMON HUNTER / DEVOURER ONLY.
 --

@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_TempestDeck.lua
 -- Tempest (Enhancement) MSW deck tracking.
 --

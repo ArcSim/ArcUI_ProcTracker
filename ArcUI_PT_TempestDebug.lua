@@ -1,3 +1,4 @@
+local ADDON, PT = ...   -- private namespace, shared with Core (never the global PT)
 -- ArcUI_PT_TempestDebug.lua
 -- Standalone Tempest timeline debugger for PT addon.
 -- Watches ALL relevant events and CDM frame hooks for both:
