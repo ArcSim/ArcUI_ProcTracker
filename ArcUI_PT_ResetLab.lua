@@ -55,6 +55,9 @@ local TRAWL = {
     "ZONE_CHANGED_NEW_AREA", "UPDATE_INSTANCE_INFO",
     "PLAYER_DIFFICULTY_CHANGED", "INSTANCE_GROUP_SIZE_CHANGED",
     "CHALLENGE_MODE_START", "CHALLENGE_MODE_RESET", "CHALLENGE_MODE_COMPLETED",
+    -- THE gate-drop carrier. Was described but never REGISTERED, so the probe was
+    -- structurally blind to the one event Core keys the M+ reset on.
+    "WORLD_STATE_TIMER_START",
     -- the most likely carriers of a server-side deck reset
     "SPELL_UPDATE_COOLDOWN", "SPELL_UPDATE_CHARGES", "SPELL_UPDATE_USABLE",
     "SPELL_UPDATE_ICON", "SPELLS_CHANGED",
@@ -66,6 +69,15 @@ local TRAWL = {
 }
 
 local enabled   = false
+-- M+ GATE MODE state. Gate events fire OUT of combat, usually well before the
+-- pull, so they must bypass the 5s BEFORE buffer or they are trimmed away.
+local labT      = nil  -- when the lab was armed, so out-of-combat lines get a real stamp
+local gateArmTS = nil  -- CHALLENGE_MODE_RESET time, to measure Core's 9s window
+local lastPEW   = -10  -- last PLAYER_ENTERING_WORLD, for Core's 2.5s guard
+local GATE_EVENTS = {
+    CHALLENGE_MODE_RESET = true, WORLD_STATE_TIMER_START = true,
+    CHALLENGE_MODE_START = true, CHALLENGE_MODE_COMPLETED = true,
+}
 local combatT   = nil
 local history   = {}   -- rolling BEFORE buffer: { t, ev, info }
 local rows      = {}   -- everything shown in the window
@@ -74,7 +86,7 @@ local rows      = {}   -- everything shown in the window
 local frame, scroll, edit
 
 local function Push(label, info, tag)
-    local t = combatT and (GetTime() - combatT) or 0
+    local t = GetTime() - (combatT or labT or GetTime())
     local sign = t >= 0 and "+" or "-"
     local color = (tag == "hit" and "|cff44FF44")
         or (tag == "combat" and "|cffFFD000")
@@ -240,6 +252,39 @@ watcher:SetScript("OnEvent", function(_, ev, a1, a2, a3)
         return
     end
 
+    -- M+ GATE MODE: bypass the combat window entirely. These fire out of combat,
+    -- often a minute before the pull, so routing them through the 5s BEFORE
+    -- buffer threw them away. Report Core's three gate conditions as they stand
+    -- at that instant, so a failure names itself instead of just going quiet.
+    if ev == "PLAYER_ENTERING_WORLD" then lastPEW = GetTime() end
+    if GATE_EVENTS[ev] then
+        local extra = ""
+        if ev == "CHALLENGE_MODE_RESET" then
+            gateArmTS = GetTime()
+            extra = "  |cff44FF44ARMED|r"
+        elseif ev == "WORLD_STATE_TIMER_START" then
+            local inInst, instType = IsInInstance()
+            local diff   = select(3, GetInstanceInfo())
+            local gap    = gateArmTS and (GetTime() - gateArmTS) or nil
+            local sincePEW = GetTime() - lastPEW
+            local okArm  = gateArmTS ~= nil and gap <= 9
+            local okID   = (a1 == 1)
+            local okCtx  = inInst and instType == "party" and diff == 8
+            local okPEW  = sincePEW > 2.5
+            extra = string.format(
+                "\n        armed=%s%s|r  timerID=%s%s|r  ctx=%s%s type=%s diff=%s|r  sincePEW=%s%.1fs|r\n        %s",
+                okArm and "|cff44FF44" or "|cffFF4444",
+                gap and string.format("yes %.2fs ago (need <=9)", gap) or "NO - never armed",
+                okID and "|cff44FF44" or "|cffFF4444", tostring(a1) .. (okID and "" or " (Core needs 1)"),
+                okCtx and "|cff44FF44" or "|cffFF4444", tostring(inInst), tostring(instType), tostring(diff),
+                okPEW and "|cff44FF44" or "|cffFF4444", sincePEW,
+                (okArm and okID and okCtx and okPEW)
+                    and "|cff44FF44>>> ALL FOUR PASS - Core resets here <<<|r"
+                    or  "|cffFF4444>>> Core does NOT reset - the red field above is why <<<|r")
+        end
+        Push(ev, (Describe(ev, a1, a2, a3) or "") .. extra, "hit")
+        return
+    end
     local info = Describe(ev, a1, a2, a3)
     if info == nil then return end   -- filtered (other unit)
     Record(ev, info)
@@ -251,6 +296,7 @@ local function SetEnabled(on)
         BuildWindow()
         frame:Show()
         wipe(rows); wipe(history); combatT = nil
+        labT = GetTime(); gateArmTS = nil
         for _, ev in ipairs(TRAWL) do watcher:RegisterEvent(ev) end
         Push("==== RESET LAB ARMED ====",
             "enter combat in the dome. BEFORE window="..BEFORE_WINDOW

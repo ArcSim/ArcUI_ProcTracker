@@ -1361,6 +1361,30 @@ local function BuildMasterOptionsTable()
         name        = "General",
         order       = 999,
         args = {
+            mplusHeader = {
+                type = "header", name = "Mythic+", order = 0.1,
+            },
+            safeMPlusReset = {
+                type  = "toggle",
+                name  = "Safe Mythic+ Reset",
+                desc  = "Reset every deck the moment a key starts.\n\n"
+                    .."ON (recommended): the reset can never be missed. If it is ever skipped, "
+                    .."the deck stays wrong for the whole dungeon, so this is the safe choice.\n\n"
+                    .."OFF: the deck resets on the yellow gate drop instead, matching the game "
+                    .."exactly. This keeps 'the skip' working, where leaving the dungeon across "
+                    .."the gate drop and coming back keeps your deck.",
+                order = 0.2,
+                width = "full",
+                get = function()
+                    local db = ArcUI_ProcTrackerDB or {}
+                    if db.safeMPlusReset == nil then return true end   -- default ON
+                    return db.safeMPlusReset == true
+                end,
+                set = function(_, v)
+                    ArcUI_ProcTrackerDB = ArcUI_ProcTrackerDB or {}
+                    ArcUI_ProcTrackerDB.safeMPlusReset = v and true or false
+                end,
+            },
             minimapHeader = {
                 type = "header", name = "Minimap Button", order = 1,
             },
@@ -2010,11 +2034,31 @@ end
 -- reload or a relog starts every deck at 0, which matches. Do NOT "improve"
 -- this by persisting deck position -- that would survive a reset the server
 -- performed and desync the counter permanently.
+-- SAFE M+ RESET (default ON). The gate-drop chain below is precise but FRAGILE,
+-- and when it misses there is no second chance for the rest of the key: the arm
+-- is one-shot, so a missed confirm means the deck silently runs the whole dungeon
+-- desynced from the server. Reported repeatedly as "sometimes it misses a reset
+-- and then never resets again".
+-- Safe mode resets on CHALLENGE_MODE_START instead, which is unconditional and
+-- cannot be missed.
+-- THE TRADE-OFF, deliberately accepted as the default: this breaks "the skip".
+-- The server only resets decks for players INSIDE at the gate drop, so someone
+-- who zones out across the drop keeps their real deck while safe mode resets the
+-- addon's. Turning this OFF restores the skip-accurate gate-drop chain.
+-- Skipping is niche; a silently wrong deck for a whole key is not.
+local function SafeMPlusResetEnabled()
+    local db = ArcUI_ProcTrackerDB
+    if not db or db.safeMPlusReset == nil then return true end   -- default ON
+    return db.safeMPlusReset == true
+end
+PT.SafeMPlusResetEnabled = SafeMPlusResetEnabled
+
 local cmResetArmed = false; local cmResetStartTS = nil; local cmResetInstID = nil
 local lastEnterWorldTS = -10
 local resetEventFrame = CreateFrame("Frame")
 resetEventFrame:RegisterEvent("ENCOUNTER_START")
 resetEventFrame:RegisterEvent("CHALLENGE_MODE_RESET")
+resetEventFrame:RegisterEvent("CHALLENGE_MODE_START")   -- safe-mode reset (see SafeMPlusResetEnabled)
 resetEventFrame:RegisterEvent("WORLD_STATE_TIMER_START")
 resetEventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 resetEventFrame:SetScript("OnEvent", function(_, event, a1)
@@ -2039,12 +2083,31 @@ resetEventFrame:SetScript("OnEvent", function(_, event, a1)
         if inInst and instType == "raid" then ResetAllDecks() end
         return
     end
+    if event == "CHALLENGE_MODE_START" then
+        -- SAFE MODE: unconditional reset the moment the key starts. Cannot be
+        -- missed by a lost arm, a slow load, or a competing world-state timer.
+        if SafeMPlusResetEnabled() then ResetAllDecks() end
+        return
+    end
     if event == "CHALLENGE_MODE_RESET" then
         cmResetArmed = true; cmResetStartTS = GetTime()
         cmResetInstID = select(8, GetInstanceInfo()); return
     end
     if event == "WORLD_STATE_TIMER_START" and cmResetArmed then
-        if a1 == 1 then
+        -- ONLY timerID 1 consumes the arm. This disarm used to sit OUTSIDE the
+        -- a1 check, so ANY world-state timer firing between CHALLENGE_MODE_RESET
+        -- and the real gate-drop timer ate the arm, and the genuine confirm was
+        -- then never seen. The chain is one-shot with no retry, so that key ran
+        -- its whole duration with a desynced deck -- "it missed the reset and
+        -- then never reset again". Unrelated timers are now ignored, and the arm
+        -- expires on its own once the 9s window has passed.
+        if a1 ~= 1 then
+            if (GetTime() - (cmResetStartTS or 0)) > 9 then
+                cmResetArmed = false; cmResetStartTS = nil; cmResetInstID = nil
+            end
+            return
+        end
+        do
             local inInst, instType = IsInInstance()
             local diff   = select(3, GetInstanceInfo())
             local instID = select(8, GetInstanceInfo())

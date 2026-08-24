@@ -1,5 +1,9 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.1.8
+- **Safe Mythic+ Reset (new, on by default)**: Decks now reset the moment a key starts, so a reset can never be missed. If you use "the skip", turn the new toggle off under Mythic+ to keep the exact gate-drop behaviour.
+- **Fixed decks sometimes not resetting in Mythic+**: A reset could be missed at the key start and the deck then stayed wrong for the whole dungeon. Fixed with Safe Reset on or off.
+
 ## 1.1.7
 - **Fixed the addon breaking when another addon uses the same name internally**: ProcTracker kept its internals under a name so short that other addons could claim it too. When one did, ProcTracker lost track of itself and threw a stream of Lua errors, and the decks stopped working entirely. If you have had error spam since installing, or it never worked at all, this is the cause and it is fixed. Nothing on your end needs changing.
 
