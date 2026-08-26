@@ -177,6 +177,8 @@ local function OnDWGain(source)
     if PT.DW.OnProc then
         PT.DW.OnProc(dwDeckNumber, dwDeckProcs, dwGainCount, deckPos)
     end
+    -- a card just came off the deck
+    if PT.Sounds then PT.Sounds.PlayFor("dw") end
     PT.UpdateDeck("dw")
 end
 
@@ -566,6 +568,8 @@ local function TryRegisterDeck()
     PT.RegisterDeck({
         id          = "dw",
         name        = "Doom Winds",
+        -- this deck's proc site calls PT.Sounds.PlayFor, so it gets the Sounds tab
+        hasProcSound = true,
         deckSize    = DECK_SIZE,
         procs       = DECK_PROCS,
         defaultIcon = DW_DEFAULT_ICON,

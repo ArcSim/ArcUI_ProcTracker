@@ -418,19 +418,48 @@ builders.range = function(win)
     return row
 end
 
--- select: 160px field + windowed scrolling pullout (12 rows)
+-- select: the field spans from the shared control column to the row's right
+-- edge. It used to be a fixed 160px pinned to the far right, which stranded it
+-- away from its label and cut off long media names ("BigWigs: Encounter War...").
+-- When the option supplies `arcPreview` the field also grows a speaker button
+-- and every pullout line gets one, so a sound can be auditioned before picking
+-- it, the same feel as the LibSharedMedia sound picker.
 builders.select = function(win)
     local row = NewRow(win, true)
     local b = CreateFrame("Button", nil, row, "BackdropTemplate")
-    b:SetSize(160, 20)
+    b:SetHeight(20)
+    -- provisional: renderRows re-columns this onto the shared control column
+    b:SetPoint("LEFT", row.label, "RIGHT", 14, 0)
     b:SetPoint("RIGHT", -12, 0)
-    row.label:SetPoint("RIGHT", b, "LEFT", -8, 0)
     Skin(b, COL.well)
     row.field = b
+    -- join the toggle column so a dropdown lines up under the checkboxes
+    -- instead of floating off on its own right margin
+    row._colLabel, row._colCtrl, row._colFill = row.label, b, true
+
+    -- SPEAKER INSIDE THE FIELD: previews whatever the field currently holds.
+    -- Hidden unless the option asked for previews.
+    local spk = CreateFrame("Button", nil, b)
+    spk:SetSize(16, 16)
+    spk:SetPoint("LEFT", 5, 0)
+    local spkTex = spk:CreateTexture(nil, "BACKGROUND")
+    spkTex:SetTexture([[Interface\Common\VoiceChat-Speaker]])
+    spkTex:SetAllPoints(spk)
+    local spkOn = spk:CreateTexture(nil, "HIGHLIGHT")
+    spkOn:SetTexture([[Interface\Common\VoiceChat-On]])
+    spkOn:SetAllPoints(spk)
+    spk:SetScript("OnClick", function()
+        if row.onPreview then row.onPreview(row.current) end
+    end)
+    spk:Hide()
+    row.speaker = spk
+    AttachTip(spk, function() return "Preview" end,
+        function() return "Play the selected sound." end)
+
     local vf = b:CreateFontString(nil, "OVERLAY")
     vf:SetFont(STANDARD_TEXT_FONT, 11, "")
     vf:SetPoint("LEFT", 8, 0)
-    vf:SetPoint("RIGHT", -14, 0)
+    vf:SetPoint("RIGHT", -18, 0)
     vf:SetJustifyH("LEFT")
     vf:SetWordWrap(false)
     vf:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3])
@@ -469,6 +498,19 @@ builders.select = function(win)
         hl:SetTexture(WHITE)
         hl:SetVertexColor(COL.arcDeep[1], COL.arcDeep[2], COL.arcDeep[3], 0.5)
         hl:SetAllPoints()
+        -- per-line speaker: auditions THAT line without picking it, so you can
+        -- walk the list and listen instead of selecting one at a time
+        local isp = CreateFrame("Button", nil, it)
+        isp:SetSize(16, 16)
+        isp:SetPoint("RIGHT", -3, 0)
+        local ispTex = isp:CreateTexture(nil, "BACKGROUND")
+        ispTex:SetTexture([[Interface\Common\VoiceChat-Speaker]])
+        ispTex:SetAllPoints(isp)
+        local ispOn = isp:CreateTexture(nil, "HIGHLIGHT")
+        ispOn:SetTexture([[Interface\Common\VoiceChat-On]])
+        ispOn:SetAllPoints(isp)
+        isp:Hide()
+        it.speaker = isp
         it.fs = it:CreateFontString(nil, "OVERLAY")
         it.fs:SetFont(STANDARD_TEXT_FONT, 11, "")
         it.fs:SetPoint("LEFT", 8, 0)
@@ -477,6 +519,10 @@ builders.select = function(win)
         it.fs:SetWordWrap(false)
         it.fs:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3])
         it.idx = i
+        isp:SetScript("OnClick", function()
+            local v = row.values and row.values[row.offset + it.idx]
+            if v and row.onPreview then row.onPreview(v.key) end
+        end)
         it:SetScript("OnClick", function(self)
             local v = row.values and row.values[row.offset + self.idx]
             if not v then return end
@@ -487,14 +533,65 @@ builders.select = function(win)
     end
     row.items = items
     row.offset = 0
+
+    -- SCROLL INDICATOR: the same thin arc slider the page itself uses, so a
+    -- long media list says how much of it is left instead of scrolling blind.
+    -- Shown only when the list actually overflows; the thumb is sized to the
+    -- visible fraction, so its height IS the "how much more is there" answer.
+    local sb = CreateFrame("Slider", nil, list)
+    sb:SetPoint("TOPRIGHT", -2, -2)
+    sb:SetPoint("BOTTOMRIGHT", -2, 2)
+    sb:SetWidth(5)
+    sb:SetOrientation("VERTICAL")
+    sb:SetMinMaxValues(0, 0)
+    sb:SetValue(0)
+    local sbt = sb:CreateTexture(nil, "BACKGROUND")
+    sbt:SetAllPoints()
+    sbt:SetTexture(WHITE)
+    sbt:SetVertexColor(COL.line[1], COL.line[2], COL.line[3], 0.5)
+    sb:SetThumbTexture(WHITE)
+    sb:GetThumbTexture():SetVertexColor(COL.arc[1], COL.arc[2], COL.arc[3], 0.8)
+    sb:Hide()
+    row.sbar = sb
+
+    -- guard: refreshList drives the slider and the slider drives refreshList
+    local syncingBar = false
     local function refreshList()
-        local vis = math.min(#(row.values or {}), VISROWS)
+        local total = #(row.values or {})
+        local vis = math.min(total, VISROWS)
+        local showSpk = row.showItemSpeakers and true or false
+        local scrollable = total > VISROWS
+        -- pull the lines in off the right edge so nothing sits under the bar
+        local rightInset = scrollable and -9 or -1
         for i = 1, VISROWS do
             local v = row.values and row.values[row.offset + i]
-            items[i].fs:SetText(v and v.label or "")
-            items[i]:SetShown(i <= vis)
+            local it = items[i]
+            it:SetPoint("TOPRIGHT", rightInset, -1 - (i - 1) * 20)
+            it.fs:SetText(v and v.label or "")
+            it.speaker:SetShown(showSpk and v ~= nil)
+            -- keep the label clear of the speaker so names are not painted under it
+            it.fs:SetPoint("RIGHT", showSpk and -22 or -4, 0)
+            it:SetShown(i <= vis)
+        end
+        sb:SetShown(scrollable)
+        if scrollable then
+            local trackH = math.max(1, vis * 20 - 2)
+            local thumbH = math.max(16, math.floor(trackH * VISROWS / total))
+            if thumbH > trackH then thumbH = trackH end
+            sb:GetThumbTexture():SetSize(5, thumbH)
+            syncingBar = true
+            sb:SetMinMaxValues(0, math.max(0, total - VISROWS))
+            sb:SetValue(row.offset)
+            syncingBar = false
         end
     end
+    sb:SetScript("OnValueChanged", function(_, v)
+        if syncingBar then return end
+        local nv = math.floor((v or 0) + 0.5)
+        if nv == row.offset then return end
+        row.offset = nv
+        refreshList()
+    end)
     list:EnableMouseWheel(true)
     list:SetScript("OnMouseWheel", function(_, delta)
         local maxOff = math.max(0, #(row.values or {}) - VISROWS)
@@ -514,8 +611,18 @@ builders.select = function(win)
         end
         refreshList()
         list:SetHeight(vis * 20 + 2)
+        -- The pullout is an overlay, so it may be WIDER than the field: that is
+        -- how a long media name stays readable while the field itself stays
+        -- compact. Bounded by the row space the field gave up, so it never
+        -- reaches the page scrollbar.
+        local fieldW = math.floor((b:GetWidth() or 160) + 0.5)
+        local room = math.floor((row._pullMax or fieldW) + 0.5)
+        local want = math.max(fieldW, 300)
+        if want > room then want = room end
+        if want < fieldW then want = fieldW end
+        list:SetWidth(math.max(160, want))
         list:ClearAllPoints()
-        list:SetPoint("TOPRIGHT", b, "BOTTOMRIGHT", 0, -1)
+        list:SetPoint("TOPLEFT", b, "BOTTOMLEFT", 0, -1)
         list:Show()
         win.openDropdown = list
     end)
@@ -828,8 +935,30 @@ local function renderRows(win, entries, xL, xR, y0)
                 row.tip = desc
                 local values = callv(opt.values, info) or {}
                 local items = {}
-                for k, label in pairs(values) do items[#items + 1] = { key = k, label = tostring(label) } end
-                table.sort(items, function(a, b) return a.label < b.label end)
+                -- honour the option's own `sorting` when it has one: curated
+                -- lists put the useful entries first (None, then our own kits,
+                -- then everyone else's media) and alphabetical scrambles that.
+                -- Anything the sorting list does not mention is appended in
+                -- alphabetical order rather than dropped.
+                local order = callv(opt.sorting, info)
+                if type(order) == "table" and #order > 0 then
+                    local seen = {}
+                    for _, k in ipairs(order) do
+                        if values[k] ~= nil and not seen[k] then
+                            items[#items + 1] = { key = k, label = tostring(values[k]) }
+                            seen[k] = true
+                        end
+                    end
+                    local rest = {}
+                    for k, label in pairs(values) do
+                        if not seen[k] then rest[#rest + 1] = { key = k, label = tostring(label) } end
+                    end
+                    table.sort(rest, function(a, b) return a.label < b.label end)
+                    for i = 1, #rest do items[#items + 1] = rest[i] end
+                else
+                    for k, label in pairs(values) do items[#items + 1] = { key = k, label = tostring(label) } end
+                    table.sort(items, function(a, b) return a.label < b.label end)
+                end
                 row.values = items
                 row.current = opt.get and opt.get(info)
                 local cur = row.current
@@ -842,7 +971,26 @@ local function renderRows(win, entries, xL, xR, y0)
                     if opt.set then opt.set(info, k) end
                     win:Rerender()
                 end
+                -- previews: the field grows a speaker and so does every pullout
+                -- line, instead of a separate button parked outside the control
+                local prev = opt.arcPreview
+                if prev then
+                    row.speaker:Show()
+                    row.valueText:SetPoint("LEFT", row.speaker, "RIGHT", 4, 0)
+                    row.showItemSpeakers = true
+                    row.onPreview = function(k)
+                        if disabled then return end
+                        prev(info, k)
+                    end
+                else
+                    row.speaker:Hide()
+                    row.valueText:SetPoint("LEFT", 8, 0)
+                    row.showItemSpeakers = false
+                    row.onPreview = nil
+                end
                 place(row, ROW_H)
+                -- share the checkbox column (full-width rows only, same rule)
+                if curCol == nil then colRows[#colRows + 1] = row end
 
             elseif otype == "color" then
                 local row = acquire(win, "color")
@@ -951,6 +1099,19 @@ local function renderRows(win, entries, xL, xR, y0)
             local r = colRows[i]
             r._colCtrl:ClearAllPoints()
             r._colCtrl:SetPoint("LEFT", r, "LEFT", col, 0)
+            -- A dropdown sits on the column like everything else, but it does
+            -- NOT stretch to the right margin: full width ran the field under
+            -- the page scrollbar and was far more room than a value needs.
+            -- Roughly half the remaining span, floored so short panels stay
+            -- usable. `_pullMax` is the space it COULD have taken, which is
+            -- what bounds the pullout below.
+            if r._colFill then
+                local avail = rowW - col - 12
+                local w = math.floor(avail * 0.52)
+                if w < 150 then w = math.min(150, avail) end
+                if w > 1 then r._colCtrl:SetWidth(w) end
+                r._pullMax = avail
+            end
             -- Bound the label at the column so an over-long name ellipsizes instead
             -- of running underneath the box. Safe to do AFTER the control is anchored
             -- to the row: label and control both hang off the row, so no anchor cycle.

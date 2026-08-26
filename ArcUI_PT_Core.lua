@@ -54,6 +54,9 @@ local ICON_DEFAULTS = {
     deckOffX=0, deckOffY=0,  deckSize=19,
     procOffX=0, procOffY=27, procSize=19,
     countDown=true, procCountDown=true,
+    procSound="None",   -- sound when a proc comes off this deck
+    procSoundEnabled=false, -- master switch: mutes without losing the picked sound
+    procSoundChannel="Master", -- which of WoW's volume sliders it rides
     showDeckSuffix=false, showProcSuffix=false,
     customIcon=nil,
     emptyR=0.0,  emptyG=1.0,  emptyB=0.0,
@@ -1460,6 +1463,82 @@ local function BuildMasterOptionsTable()
         -- its displays. Reset and the detection method both apply to the Icon
         -- and the Bar equally, so neither belongs inside the Widget tab -- and
         -- nothing in here is gated on the icon being enabled.
+        -- Sounds gets its own tab rather than living inside Icon: it is not about
+        -- the widget, and it is where every future audio option belongs.
+        -- Sounds gets its own tab rather than living inside Icon: it is not about
+        -- the widget, and it is where every future audio option belongs.
+        --
+        -- NOTE this is built in the CALLER, outside BuildDeckOptionsGroup, so the
+        -- `db()` / `o()` locals that the icon options use are NOT in scope here.
+        -- Use the public accessor instead -- reaching for db() made every render
+        -- of this tab throw "attempt to call a nil value".
+        local function sdb() return PT.GetIconDB(entry.id) end
+        local function soundOff() return not sdb().procSoundEnabled end
+        local function playCurrent()
+            if PT.Sounds then PT.Sounds.Play(sdb().procSound, sdb().procSoundChannel) end
+        end
+        local soundsGroup = {
+            type = "group", name = "Sounds", order = 2.5,
+            args = {
+                procHeader = {
+                    type = "header", name = "Proc Sound", order = 0,
+                },
+                procDesc = {
+                    type = "description", order = 0.5, fontSize = "medium",
+                    name = "Play a sound the moment a proc comes off this deck.",
+                },
+                procEnabled = {
+                    type  = "toggle", name = "Enable Proc Sound",
+                    desc  = "Turn the proc sound on and off. Your chosen sound is kept either way, so you can silence it for one pull and switch it back on without picking it again.",
+                    order = 1, width = 1.4,
+                    get   = function() return sdb().procSoundEnabled and true or false end,
+                    set   = function(_, v)
+                        sdb().procSoundEnabled = v and true or false
+                        -- hear it the moment you switch it on
+                        if v then playCurrent() end
+                    end,
+                },
+                procSound = {
+                    type  = "select", name = "Proc Sound",
+                    desc  = "Play a sound when a proc comes off this deck. "
+                         .. "|cff8298b4The Ultra Instinct and Kaching sounds ship with ProcTracker. The Reveal and Alert entries are the game's own sounds, so they cost nothing and work for everyone. Any LibSharedMedia sound you have installed is offered too, so you can use your own file.|r",
+                    order = 2, width = 1.4,
+                    disabled = soundOff,
+                    values  = function() return PT.Sounds and PT.Sounds.Values() or { None = "None" } end,
+                    sorting = function() return PT.Sounds and PT.Sounds.Sorting() or { "None" } end,
+                    get   = function() return sdb().procSound or "None" end,
+                    set   = function(_, v)
+                        sdb().procSound = v
+                        -- preview on pick: choosing a sound you cannot hear is useless
+                        if PT.Sounds then PT.Sounds.Play(v, sdb().procSoundChannel) end
+                    end,
+                    -- ArcSkin puts a speaker in the field and on every line of
+                    -- the pullout, so you can audition a sound without picking it
+                    arcPreview = function(_, v)
+                        if PT.Sounds then PT.Sounds.Play(v, sdb().procSoundChannel) end
+                    end,
+                },
+                procChannel = {
+                    type  = "select", name = "Output Channel",
+                    desc  = "Which of the game's volume sliders this sound comes out of. "
+                         .. "|cff8298b4Master ignores the other sliders, so the sound stays audible even with Sound Effects turned right down. Pick one of the others if you would rather it follow a slider you already set.|r",
+                    order = 3, width = 1.4,
+                    disabled = soundOff,
+                    values  = function() return PT.Sounds and PT.Sounds.ChannelValues() or { Master = "Master" } end,
+                    sorting = function() return PT.Sounds and PT.Sounds.ChannelSorting() or { "Master" } end,
+                    get   = function() return sdb().procSoundChannel or "Master" end,
+                    set   = function(_, v)
+                        sdb().procSoundChannel = v
+                        if PT.Sounds then PT.Sounds.Play(sdb().procSound, v) end
+                    end,
+                    -- hear the current sound on whichever channel you point at
+                    arcPreview = function(_, v)
+                        if PT.Sounds then PT.Sounds.Play(sdb().procSound, v) end
+                    end,
+                },
+            },
+        }
+
         local behaviorGroup = {
             type = "group", name = "Behavior", order = 3,
             args = {
@@ -1582,6 +1661,10 @@ local function BuildMasterOptionsTable()
                         }
                     }
                 },
+                -- Only decks whose proc site calls PT.Sounds.PlayFor get this
+                -- tab. Showing it everywhere would offer a sound that never
+                -- plays on the decks that are not wired up yet.
+                sounds = entry.hasProcSound and soundsGroup or nil,
                 reset = behaviorGroup,
             },
         }

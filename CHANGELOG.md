@@ -1,5 +1,8 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.2.0
+- **Proc sounds for Doom Winds**: Play a sound the moment a proc comes off the Doom Winds deck, set up under the deck's new Sounds tab.
+
 ## 1.1.8
 - **Safe Mythic+ Reset (new, on by default)**: Decks now reset the moment a key starts, so a reset can never be missed. If you use "the skip", turn the new toggle off under Mythic+ to keep the exact gate-drop behaviour.
 - **Fixed decks sometimes not resetting in Mythic+**: A reset could be missed at the key start and the deck then stayed wrong for the whole dungeon. Fixed with Safe Reset on or off.
