@@ -54,6 +54,51 @@ local ICON_DEFAULTS = {
     deckOffX=0, deckOffY=0,  deckSize=19,
     procOffX=0, procOffY=27, procSize=19,
     countDown=true, procCountDown=true,
+    -- The three readouts are independent: each has its own Show toggle, font,
+    -- size, colour and position. Deck and proc default ON because they predate
+    -- the toggles and were always drawn; the chance text is new, so it is opt-in.
+    showDeckText=true, showProcText=true, showChanceText=false,
+    -- Anchor spec per text: "0" = this widget's own icon, "cdm:<id>" = a
+    -- Cooldown Manager icon, "action:<ids>" = an action bar button.
+    deckAnchor="0", procAnchor="0", chanceAnchor="0", violAnchor="0",
+    -- STATE VISUALS (timer entries). Two buckets, named for what the player
+    -- sees rather than ArcUI's readyState/cooldownState pair -- that naming is
+    -- FLIPPED for timers over there (running maps to readyState) and its own
+    -- skill calls it the number one source of confusion. Here: "ready" means
+    -- usable, "cd" means the internal cooldown is running.
+    rdyAlpha=1.0, rdyDesat=false, rdyTint=false, rdyTintR=1, rdyTintG=1, rdyTintB=1,
+    rdyGlow=false, rdyGlowStyle="pixel", rdyGlowR=0.95, rdyGlowG=0.95, rdyGlowB=0.32,
+    rdyGlowPad=0, rdyGlowX=0, rdyGlowY=0, rdyGlowSpeed=0.25,
+    rdyGlowLines=8, rdyGlowLength=0, rdyGlowThick=2, rdyGlowBorder=false,
+    rdyGlowParticles=4, rdyGlowScale=1, rdyGlowDuration=1,
+    cdAlpha=1.0,  cdDesat=false,  cdTint=false,  cdTintR=1,  cdTintG=1,  cdTintB=1,
+    cdGlow=false, cdGlowStyle="pixel", cdGlowR=0.95, cdGlowG=0.95, cdGlowB=0.32,
+    cdGlowPad=0, cdGlowX=0, cdGlowY=0, cdGlowSpeed=0.25,
+    -- COOLDOWN ANIMATION (timer entries): the sweep the game draws over the
+    -- icon while the internal cooldown runs. Blizzard's own defaults, except
+    -- the edge line, which each entry can turn on for itself.
+    swipeShow=true, swipeR=0, swipeG=0, swipeB=0, swipeA=0.8,
+    swipeEdge=false, swipeNumbers=true, swipeBling=true, swipeReverse=false,
+    cdGlowLines=8, cdGlowLength=0, cdGlowThick=2, cdGlowBorder=false,
+    cdGlowParticles=4, cdGlowScale=1, cdGlowDuration=1,
+    chanceOffX=0, chanceOffY=-27, chanceSize=19,
+    chanceSpend=10,             -- stacks the next spender is assumed to eat (Enh full stack)
+    chanceForecast="auto",      -- Ele only: "auto" | "instant" | "blast"
+    chanceDecimals=true,        -- show 4.9% rather than 5%
+    chanceColorMode="fixed",    -- "fixed" | "procs" | "chance"
+    chanceR=1.0, chanceG=1.0, chanceB=1.0,
+    -- "chance" mode: below low = cold, at/above high = hot, between = mid
+    chanceLowPct=3, chanceHighPct=10,
+    chanceColdR=0.6, chanceColdG=0.6, chanceColdB=0.6,
+    chanceMidR=1.0,  chanceMidG=0.82, chanceMidB=0.0,
+    chanceHotR=0.0,  chanceHotG=1.0,  chanceHotB=0.0,
+    -- "procs left" mode: ONE COLOUR PER PROC COUNT, not three fixed buckets.
+    -- Deck sizes differ (Doom Winds 3, Storm Unleashed 5, Tempest 2,
+    -- Soulburst 1), and every one of them is small enough to name each count
+    -- outright, which beats asking the user to pick thresholds over a range of
+    -- three values. Sparse: only counts the user has actually edited are
+    -- stored; the rest fall back to DefaultCountColor.
+    chanceCountColors=nil,
     procSound="None",   -- sound when a proc comes off this deck
     procSoundEnabled=false, -- master switch: mutes without losing the picked sound
     procSoundChannel="Master", -- which of WoW's volume sliders it rides
@@ -141,6 +186,7 @@ function PT.ApplyIconFonts(entry)
     PT.SetFontSafe(w._deckText, db.deckFont, db.deckSize)
     PT.SetFontSafe(w._procText, db.procFont, db.procSize)
     PT.SetFontSafe(w._violText, db.violFont, db.violSize or 12)
+    PT.SetFontSafe(w._chanceText, db.chanceFont, db.chanceSize or 19)
 end
 
 local function IconDB(id)
@@ -148,6 +194,16 @@ local function IconDB(id)
     db.icons = db.icons or {}
     db.icons[id] = db.icons[id] or {}
     local t = db.icons[id]
+    -- Entry-specific defaults win over the shared ones, so a tracker can ship a
+    -- different starting strata, size or colour without every icon inheriting
+    -- it. Applied FIRST: both passes only fill nils, so whichever runs first
+    -- decides. A value the user has actually set is never touched by either.
+    local e = registryMap[id]
+    if e and e.iconDefaults then
+        for k, v in pairs(e.iconDefaults) do
+            if t[k] == nil then t[k] = v end
+        end
+    end
     for k, v in pairs(ICON_DEFAULTS) do
         if t[k] == nil then t[k] = v end
     end
@@ -237,7 +293,342 @@ function PT.RefreshOptions()
     if skin and skin.Refresh then skin:Refresh(PT_OPTIONS_NAME) end
 end
 
+-- ── CDM frame lookup ──────────────────────────────────────────────────────────
+-- Find an ACTIVE Cooldown Manager icon by its cooldownID, so a text overlay can
+-- ride it and move wherever the player puts their CDM bars.
+--
+-- Walks itemFramePool:EnumerateActive(), NOT viewer:GetChildren(): CDM icons get
+-- reparented (ArcUI moves them into its own groups), and a GetChildren sweep
+-- silently misses those. Reading frame.cooldownID is a READ of a Blizzard field,
+-- which never taints -- deliberately no CDM method calls or C_CooldownViewer
+-- lookups here, since those are the paths that hand Blizzard code our taint.
+local PT_CDM_VIEWERS = {
+    "BuffIconCooldownViewer",
+    "BuffBarCooldownViewer",
+    "EssentialCooldownViewer",
+    "UtilityCooldownViewer",
+}
+
+-- ── Action bar lookup ─────────────────────────────────────────────────────────
+-- Find the action button currently holding one of `ids`, so a text overlay can
+-- ride the player's own keybind button wherever their bars are.
+--
+-- Two sources, because no single one covers everything:
+--   1. Every LibActionButton-1.0 registry in LibStub. Bartender4 and ElvUI each
+--      ship their OWN copy under a different major string, so enumerate rather
+--      than hardcode a name -- this picks up future LAB bars for free.
+--   2. Known button names, for bars that are not LAB-based (Blizzard's own,
+--      EllesmereUI).
+--
+-- `statehidden` buttons are skipped: a button on an inactive bar page still
+-- exists and still reports an action slot, and anchoring to one would park the
+-- text on something invisible.
+--
+-- A MACRO slot resolves to whatever it actually casts, so a "#showtooltip
+-- Ascendance" macro matches exactly like a bare spell would.
+local PT_BAR_PREFIXES = {
+    "ActionButton", "MultiBarBottomLeftButton", "MultiBarBottomRightButton",
+    "MultiBarRightButton", "MultiBarLeftButton",
+    "MultiBar5Button", "MultiBar6Button", "MultiBar7Button",
+}
+
+local function ButtonHoldsSpell(btn, ids)
+    if not btn then return false end
+    if btn.GetAttribute and btn:GetAttribute("statehidden") then return false end
+    if btn.IsShown and not btn:IsShown() then return false end
+    local slot = btn.action or (btn.GetAttribute and btn:GetAttribute("action"))
+    if type(slot) ~= "number" or not HasAction(slot) then return false end
+    local aType, id = GetActionInfo(slot)
+    if aType ~= "spell" and aType ~= "macro" then return false end
+    if not id then return false end
+    for i = 1, #ids do if ids[i] == id then return true end end
+    return false
+end
+
+function PT.FindActionButton(ids)
+    if type(ids) ~= "table" or #ids == 0 then return nil end
+    if LibStub and type(LibStub.libs) == "table" then
+        for major, lib in pairs(LibStub.libs) do
+            if type(major) == "string" and major:find("^LibActionButton%-1%.0")
+               and type(lib) == "table" and type(lib.GetAllButtons) == "function" then
+                for b in pairs(lib:GetAllButtons()) do
+                    if ButtonHoldsSpell(b, ids) then return b end
+                end
+            end
+        end
+    end
+    for _, prefix in ipairs(PT_BAR_PREFIXES) do
+        for i = 1, 12 do
+            local b = _G[prefix .. i]
+            if ButtonHoldsSpell(b, ids) then return b end
+        end
+    end
+    return nil
+end
+
+function PT.FindCDMFrame(cooldownID)
+    if not cooldownID or cooldownID == 0 then return nil end
+    for _, viewerName in ipairs(PT_CDM_VIEWERS) do
+        local viewer = _G[viewerName]
+        if viewer and viewer.itemFramePool then
+            for frame in viewer.itemFramePool:EnumerateActive() do
+                if frame.cooldownID == cooldownID then return frame end
+            end
+        end
+    end
+    return nil
+end
+
+-- ── Deck proc chance ──────────────────────────────────────────────────────────
+-- A deck is `size` cards holding `procs` procs, and every unit of resource
+-- spent turns one card. So "will my next spender proc?" is hypergeometric:
+-- draw K cards from the N remaining, which hold P remaining procs.
+--
+-- MissChance returns the probability of drawing NONE of the p procs. It is the
+-- P-term form (at most a handful of factors) rather than the K-term one, which
+-- keeps it exact in floating point and cheap:
+--     C(n-p, k) / C(n, k) = product over j of (n-k-j) / (n-j)
+local function MissChance(n, p, k)
+    if p <= 0 then return 1 end          -- no procs left to hit
+    if k <= 0 then return 1 end          -- drawing nothing hits nothing
+    if n - k < p then return 0 end       -- drawing so many that a proc is certain
+    local miss = 1
+    for j = 0, p - 1 do
+        miss = miss * (n - k - j) / (n - j)
+    end
+    return miss
+end
+
+-- CONTINUITY is the part players actually ask about: a spend that runs off the
+-- end of the deck keeps drawing into the NEXT deck, which is freshly stocked.
+-- So sitting on 0 procs left near the end of a deck is NOT a flat zero.
+-- Returns a PERCENTAGE (0-100).
+function PT.DeckChance(size, maxProcs, pos, procsHit, spend)
+    size     = size or 1
+    maxProcs = maxProcs or 0
+    local K = tonumber(spend) or 0
+    if K < 1 then K = 1 end
+    local N = size - (pos % size)                  -- cards left in this deck
+    local P = maxProcs - (procsHit or 0)           -- procs left in this deck
+    if P < 0 then P = 0 end
+
+    if K < N then
+        return (1 - MissChance(N, P, K)) * 100
+    end
+    -- the spender consumes the rest of this deck; anything left over starts the
+    -- next one. Emptying a deck that still holds procs cannot miss.
+    local miss = (P > 0) and 0 or 1
+    local over = K - N
+    if over > 0 then
+        miss = miss * MissChance(size, maxProcs, over)
+    end
+    return (1 - miss) * 100
+end
+
+-- Shared formatting so every deck's readout looks the same. A decimal matters
+-- at the low end: a full Doom Winds deck sits at 4.9%, and rounding that to 5%
+-- throws away most of the range the number ever moves in.
+function PT.FormatChance(pct, decimals)
+    if pct >= 99.95 then return "100%" end
+    if decimals ~= false and pct < 10 then return string.format("%.1f%%", pct) end
+    return string.format("%.0f%%", pct)
+end
+
 -- ── Widget helpers ────────────────────────────────────────────────────────────
+
+-- Default colour for "N procs left", for any deck size: a full deck reads
+-- green, a spent one red, anything between gold. Mirrors the proc counter's
+-- own empty/half/full defaults so the two readouts start out agreeing.
+-- NOTE the name: anything containing the literal "CountColor" trips the
+-- pre-release upvalue checker, which matches defined names by SUBSTRING and
+-- would flag this line as a call to CountColor below it.
+local function ProcCountTint(left, maxProcs)
+    if left <= 0 then return 1, 0, 0 end
+    if left >= (maxProcs or 1) then return 0, 1, 0 end
+    return 1, 0.82, 0
+end
+
+-- The stored override for a count, if the user set one.
+local function CountColor(db, left, maxProcs)
+    local t = db.chanceCountColors and db.chanceCountColors[left]
+    if t then return t[1] or 1, t[2] or 1, t[3] or 1 end
+    return ProcCountTint(left, maxProcs)
+end
+PT.CountColor = CountColor
+
+-- Where a given text hangs. 0 / nil = this widget's own icon (the default and
+-- the old behaviour). Anything else is a CDM cooldownID: the text rides that
+-- icon and moves with the player's CDM bars.
+--
+-- FALLS BACK to the widget's icon whenever the CDM frame is not up (talent not
+-- taken, spell not on their bars, mid-reshuffle). A text that silently vanishes
+-- because its anchor went away is far worse than one that goes home.
+-- The anchor SPEC is a string so it can name what kind of thing it points at:
+--   nil / "" / "0"     this widget's own icon (the default, and the old behaviour)
+--   "cdm:<cooldownID>" a Cooldown Manager icon
+--   "action:<a,b,c>"   an action button holding ANY of those spell IDs. A list,
+--                      because a spell can sit on the bar under more than one id
+--                      (Ascendance is 114051 and 384352), and which one the bar
+--                      reports depends on overrides.
+-- A bare number is still accepted: this shipped as a cooldownID for one session
+-- before action bars were an option.
+local function ParseIDs(csv)
+    local t = {}
+    for n in tostring(csv):gmatch("[-]?%d+") do t[#t + 1] = tonumber(n) end
+    return t
+end
+
+-- spec -> last frame we resolved it to. Never stale-dangerous: every read is
+-- validated before use, so a wrong entry costs one failed check and a re-sweep.
+local anchorCache = {}
+local anchorIDs   = {}   -- spec -> parsed id list, so the pattern match is done once
+
+function PT.InvalidateAnchorCache()
+    wipe(anchorCache)
+end
+
+local function ResolveAnchor(spec)
+    local ids = anchorIDs[spec]
+    if not ids then
+        local kind, rest = spec:match("^(%a+):(.+)$")
+        if not kind then return nil end
+        ids = { kind = kind, list = ParseIDs(rest) }
+        anchorIDs[spec] = ids
+    end
+
+    -- validate the remembered frame first: O(1), and the common case
+    local cached = anchorCache[spec]
+    if cached then
+        if ids.kind == "cdm" then
+            if cached.cooldownID == ids.list[1] then return cached end
+        elseif ids.kind == "action" then
+            if ButtonHoldsSpell(cached, ids.list) then return cached end
+        end
+        anchorCache[spec] = nil
+    end
+
+    local found
+    if ids.kind == "cdm" then
+        found = PT.FindCDMFrame(ids.list[1])
+    elseif ids.kind == "action" then
+        found = PT.FindActionButton(ids.list)
+    end
+    anchorCache[spec] = found
+    return found
+end
+
+-- ── Timer state visuals ───────────────────────────────────────────────────────
+-- ONE writer for the icon's look, so alpha/desaturate/tint/glow can never fight
+-- each other. Called from UpdateIcon's timer branch with the current state; it
+-- reads that state's settings and applies all four.
+-- Resolved lazily, NOT at file scope: Core loads before some libraries, and a
+-- file-scope grab would cache nil forever and silently kill every glow.
+local GLOW_KEY = "ArcPTState"
+local function GetLCG()
+    return LibStub and LibStub("LibCustomGlow-1.0", true)
+end
+
+local function StopStateGlow(w)
+    local LCG = GetLCG()
+    if not (LCG and w._icon) then return end
+    local host = w._glowHost
+    if not host then return end
+    LCG.PixelGlow_Stop(host, GLOW_KEY)
+    LCG.AutoCastGlow_Stop(host, GLOW_KEY)
+    LCG.ButtonGlow_Stop(host, GLOW_KEY)
+    LCG.ProcGlow_Stop(host, GLOW_KEY)
+end
+
+-- The sweep the game draws over the icon. Every knob here is a plain widget
+-- setter, so none of it touches the duration itself -- the timer stays exactly
+-- as secret-safe as it was.
+local function ApplyCooldownLook(w, db)
+    local cd = w._ngCooldown
+    if not cd then return end
+    cd:SetDrawSwipe(db.swipeShow ~= false)
+    cd:SetSwipeColor(db.swipeR or 0, db.swipeG or 0, db.swipeB or 0,
+        (type(db.swipeA) == "number") and db.swipeA or 0.8)
+    cd:SetDrawEdge(db.swipeEdge == true)
+    cd:SetHideCountdownNumbers(db.swipeNumbers == false)
+    cd:SetDrawBling(db.swipeBling ~= false)
+    cd:SetReverse(db.swipeReverse == true)
+end
+
+local function ApplyStateVisuals(w, db, onCD)
+    if not w._icon then return end
+    local p = onCD and "cd" or "rdy"
+    local alpha = db[p .. "Alpha"]
+    if type(alpha) ~= "number" then alpha = 1 end
+    w._icon:SetAlpha(alpha)
+    w._icon:SetDesaturated(db[p .. "Desat"] == true)
+    if db[p .. "Tint"] == true then
+        w._icon:SetVertexColor(db[p .. "TintR"] or 1, db[p .. "TintG"] or 1, db[p .. "TintB"] or 1)
+    else
+        w._icon:SetVertexColor(1, 1, 1)
+    end
+
+    -- Glow needs a FRAME to hang on; the icon is a texture. One host per widget.
+    --
+    -- PADDING AND MOVEMENT BOTH LIVE ON THE HOST, and LCG's own xOffset/yOffset
+    -- are left at zero. Those arguments mean EXPANSION from the frame edge, not
+    -- movement -- feeding a "move the glow down" value into them just grows the
+    -- halo, which is the documented "proc glow sits lower" bug. Sizing the host
+    -- for padding and anchoring it for movement keeps one mechanism for each and
+    -- makes both behave identically across every style.
+    local LCG = GetLCG()
+    if not LCG then return end
+    if not w._glowHost then
+        w._glowHost = CreateFrame("Frame", nil, w)
+    end
+    StopStateGlow(w)
+    if db[p .. "Glow"] ~= true then return end
+
+    local iw, ih = w._icon:GetSize()
+    if not iw or iw < 1 then iw, ih = 32, 32 end
+    local pad = tonumber(db[p .. "GlowPad"]) or 0
+    w._glowHost:ClearAllPoints()
+    w._glowHost:SetSize(iw + pad * 2, ih + pad * 2)
+    w._glowHost:SetPoint("CENTER", w._icon, "CENTER",
+        tonumber(db[p .. "GlowX"]) or 0, tonumber(db[p .. "GlowY"]) or 0)
+
+    local col   = { db[p .. "GlowR"] or 0.95, db[p .. "GlowG"] or 0.95, db[p .. "GlowB"] or 0.32, 1 }
+    local style = db[p .. "GlowStyle"] or "pixel"
+    local speed = tonumber(db[p .. "GlowSpeed"]) or 0.25
+    if style == "autocast" then
+        LCG.AutoCastGlow_Start(w._glowHost, col,
+            tonumber(db[p .. "GlowParticles"]) or 4, speed,
+            tonumber(db[p .. "GlowScale"]) or 1, 0, 0, GLOW_KEY)
+    elseif style == "button" then
+        LCG.ButtonGlow_Start(w._glowHost, col, speed, nil, GLOW_KEY, 0, 0)
+    elseif style == "proc" or style == "procloop" then
+        -- same art; the loop variant skips the burst intro, which on a state
+        -- that is already running reads as a proc that just happened
+        LCG.ProcGlow_Start(w._glowHost, {
+            color = col, key = GLOW_KEY,
+            startAnim = (style == "proc"),
+            duration = tonumber(db[p .. "GlowDuration"]) or 1,
+        })
+    else
+        -- length 0 means "let the library work it out from the frame size"
+        local len = tonumber(db[p .. "GlowLength"]) or 0
+        LCG.PixelGlow_Start(w._glowHost, col,
+            tonumber(db[p .. "GlowLines"]) or 8, speed,
+            (len > 0) and len or nil,
+            tonumber(db[p .. "GlowThick"]) or 2,
+            0, 0, db[p .. "GlowBorder"] == true, GLOW_KEY)
+    end
+end
+
+local function TextAnchor(w, spec)
+    -- Fast path, and the default: no anchor set means no lookup at all, so a
+    -- user who never turns this on pays a single comparison.
+    if spec == nil or spec == 0 or spec == "0" or spec == "" then return w._icon end
+    if type(spec) == "number" then spec = "cdm:" .. spec end
+    if type(spec) ~= "string" then return w._icon end
+    return ResolveAnchor(spec) or w._icon
+end
+PT.TextAnchor = TextAnchor
+
 local function ProcColor(db, procs, maxProcs)
     if db.procCountDown then
         local rem = maxProcs - procs
@@ -291,12 +682,39 @@ local function UpdateIcon(entry)
             PT.SetFontSafe(w._violText, db.violFont, db.violSize or 12)
             w._violText:SetText(tostring(v))
             w._violText:ClearAllPoints()
-            w._violText:SetPoint("CENTER", w._icon, "CENTER", db.violOffX or 0, db.violOffY or -20)
+            w._violText:SetPoint("CENTER", TextAnchor(w, db.violAnchor), "CENTER", db.violOffX or 0, db.violOffY or -20)
             w._violText:Show()
         else
             w._violText:Hide()
         end
     end
+    -- A timer entry has no deck, so none of the deck-shaped readouts mean
+    -- anything for it. Bail after the icon itself is drawn.
+    if entry.isTimer then
+        local onCD = entry.ns and entry.ns.IsOnCooldown and entry.ns.IsOnCooldown() or false
+        if w._previewState then onCD = (w._previewState == "cd") end
+        if w._icon then
+            w._icon:SetShown(not textOnly)
+            ApplyStateVisuals(w, db, onCD)
+        end
+        ApplyCooldownLook(w, db)
+        if w._ngCooldown then w._ngCooldown:SetShown(not textOnly) end
+        if w._deckText   then w._deckText:Hide() end
+        if w._procText   then w._procText:Hide() end
+        if w._chanceText then w._chanceText:Hide() end
+        if w._violText   then w._violText:Hide() end
+        if w._cdmWarn    then w._cdmWarn:Hide() end
+        if w._cdmWarnText then w._cdmWarnText:Hide() end
+        if textOnly then
+            if w._arcPTBorderEdges then
+                for _, t in pairs(w._arcPTBorderEdges) do t:Hide() end
+            end
+        else
+            UpdateBorder(w, db, w._icon)
+        end
+        return
+    end
+
     local deckSize = entry.deckSize
     local maxProcs = entry.procs
     local raw      = entry.GetDeckPos()   -- 0-based position in deck
@@ -334,8 +752,49 @@ local function UpdateIcon(entry)
     w._deckText:SetText(deckStr)
     w._deckText:SetTextColor(db.deckR, db.deckG, db.deckB)
     w._deckText:ClearAllPoints()
-    w._deckText:SetPoint("CENTER", w._icon, "CENTER", db.deckOffX, db.deckOffY)
+    w._deckText:SetPoint("CENTER", TextAnchor(w, db.deckAnchor), "CENTER", db.deckOffX, db.deckOffY)
+    w._deckText:SetShown(db.showDeckText ~= false)
 
+    -- ── PROC CHANCE readout ────────────────────────────────────────────────
+    -- Its own text, not a mode on the deck text, so it can sit alongside the
+    -- card index rather than replacing it. Only decks that can actually work
+    -- out a chance (GetChanceText) ever draw it.
+    if w._chanceText then
+        local wantChance = (db.showChanceText == true) and entry.GetChanceText ~= nil
+        if wantChance then
+            local pct = entry.GetChanceValue and entry.GetChanceValue() or nil
+            local str = entry.GetChanceText()
+            w._chanceText:SetText(str or "")
+            local cr, cg, cb = db.chanceR or 1, db.chanceG or 1, db.chanceB or 1
+            local mode = db.chanceColorMode or "fixed"
+            if mode == "procs" then
+                -- keyed on procs LEFT (what actually drives the chance), not on
+                -- procs hit, so the colour tracks the number the reading means
+                local left = maxProcs - procs
+                if left < 0 then left = 0 end
+                cr, cg, cb = CountColor(db, left, maxProcs)
+            elseif mode == "chance" and pct then
+                local lo = db.chanceLowPct or 3
+                local hi = db.chanceHighPct or 10
+                if pct >= hi then
+                    cr, cg, cb = db.chanceHotR or 0, db.chanceHotG or 1, db.chanceHotB or 0
+                elseif pct < lo then
+                    cr, cg, cb = db.chanceColdR or 0.6, db.chanceColdG or 0.6, db.chanceColdB or 0.6
+                else
+                    cr, cg, cb = db.chanceMidR or 1, db.chanceMidG or 0.82, db.chanceMidB or 0
+                end
+            end
+            PT.SetFontSafe(w._chanceText, db.chanceFont, db.chanceSize or 19)
+            w._chanceText:SetShadowOffset(1, -1); w._chanceText:SetShadowColor(0, 0, 0, 1)
+            w._chanceText:SetTextColor(cr, cg, cb)
+            w._chanceText:ClearAllPoints()
+            w._chanceText:SetPoint("CENTER", TextAnchor(w, db.chanceAnchor), "CENTER",
+                db.chanceOffX or 0, db.chanceOffY or -27)
+        end
+        w._chanceText:SetShown(wantChance)
+    end
+
+    w._procText:SetShown(db.showProcText ~= false)
     local procStr = tostring(procDisp) .. procSuffix
     if entry.GetProcText then
         local s = entry.GetProcText()
@@ -347,7 +806,7 @@ local function UpdateIcon(entry)
     w._procText:SetText(procStr)
     w._procText:SetTextColor(r, g, b)
     w._procText:ClearAllPoints()
-    w._procText:SetPoint("CENTER", w._icon, "CENTER", db.procOffX, db.procOffY)
+    w._procText:SetPoint("CENTER", TextAnchor(w, db.procAnchor), "CENTER", db.procOffX, db.procOffY)
 
     -- Border — hidden in text-only mode, otherwise applied to icon texture
     if textOnly then
@@ -362,6 +821,31 @@ local function UpdateIcon(entry)
     if w._deckTextHandle and w._deckTextHandle._resync then w._deckTextHandle._resync() end
     if w._procTextHandle and w._procTextHandle._resync then w._procTextHandle._resync() end
     if w._violTextHandle and w._violTextHandle._resync then w._violTextHandle._resync() end
+end
+
+-- PREVIEW: hold the icon in one state for a few seconds so its look can be
+-- judged without waiting for the real thing. UpdateIcon reads _previewState
+-- INSTEAD of the live state while it is set, so the preview cannot be stomped
+-- by a refresh landing mid-preview (a proc, a bar event, an options rerender).
+local PREVIEW_SECONDS = 6
+
+function PT.PreviewState(entry, p)
+    local w = entry and entry.widget
+    if not w then return end
+    w._previewState = p
+    -- Show the sweep too when previewing the cooldown look, but never while a
+    -- REAL cooldown is running -- overwriting it would lie about the timer.
+    local live = entry.ns and entry.ns.IsOnCooldown and entry.ns.IsOnCooldown()
+    if p == "cd" and w._ngCooldown and not live then
+        w._ngCooldown:SetCooldown(GetTime(), PREVIEW_SECONDS)
+    end
+    UpdateIcon(entry)
+    C_Timer.After(PREVIEW_SECONDS, function()
+        if w._previewState ~= p then return end   -- a newer preview took over
+        w._previewState = nil
+        -- hand the icon back to whoever actually owns its state
+        if entry.ns and entry.ns.Refresh then entry.ns.Refresh() else UpdateIcon(entry) end
+    end)
 end
 
 local function ApplyIconSize(f, w, h)
@@ -389,7 +873,15 @@ local function MakeTextDragHandle(parent, fontString, anchorTo, getDB, offXKey, 
     outline:Hide()
     h._outline = outline
 
-    -- Anchor handle directly to anchorTo (the icon) at the current text offset.
+    -- anchorTo may be a FRAME or a FUNCTION returning one. It has to be able to
+    -- change: a text can ride a CDM icon, and CDM swaps those frames out from
+    -- under us on every layout refresh.
+    local function AT()
+        if type(anchorTo) == "function" then return anchorTo() end
+        return anchorTo
+    end
+
+    -- Anchor handle directly to the anchor (the icon) at the current text offset.
     -- The FontString's offset and the handle's offset use the same value,
     -- so dragging the handle directly mutates that offset in DB coordinates.
     local function Resync()
@@ -399,7 +891,7 @@ local function MakeTextDragHandle(parent, fontString, anchorTo, getDB, offXKey, 
         h:SetSize(tw + 6, th + 4)
         local d = getDB()
         h:ClearAllPoints()
-        h:SetPoint("CENTER", anchorTo, "CENTER", d[offXKey] or 0, d[offYKey] or 0)
+        h:SetPoint("CENTER", AT(), "CENTER", d[offXKey] or 0, d[offYKey] or 0)
     end
     h._resync = Resync
 
@@ -422,7 +914,7 @@ local function MakeTextDragHandle(parent, fontString, anchorTo, getDB, offXKey, 
         d[offXKey] = newX
         d[offYKey] = newY
         self:ClearAllPoints()
-        self:SetPoint("CENTER", anchorTo, "CENTER", newX, newY)
+        self:SetPoint("CENTER", AT(), "CENTER", newX, newY)
         dragStartCX, dragStartCY = nil, nil
         if onRefresh then onRefresh() end
         if AceConfigRegistry then
@@ -449,9 +941,9 @@ local function MakeTextDragHandle(parent, fontString, anchorTo, getDB, offXKey, 
             local newX = dragStartOffX + dx
             local newY = dragStartOffY + dy
             s:ClearAllPoints()
-            s:SetPoint("CENTER", anchorTo, "CENTER", newX, newY)
+            s:SetPoint("CENTER", AT(), "CENTER", newX, newY)
             fontString:ClearAllPoints()
-            fontString:SetPoint("CENTER", anchorTo, "CENTER", newX, newY)
+            fontString:SetPoint("CENTER", AT(), "CENTER", newX, newY)
         end)
     end)
     h:SetScript("OnMouseUp", function(self, button)
@@ -468,7 +960,7 @@ end
 local function ApplyTextDragHandleState(entry, unlocked)
     local w = entry.widget
     if not w then return end
-    for _, key in ipairs({"_deckTextHandle", "_procTextHandle", "_violTextHandle"}) do
+    for _, key in ipairs({"_deckTextHandle", "_procTextHandle", "_violTextHandle", "_chanceTextHandle"}) do
         local h = w[key]
         if h then
             h:EnableMouse(unlocked == true)
@@ -540,7 +1032,7 @@ local function BuildIconWidget(entry)
     dt:SetDrawLayer("OVERLAY", 2)
     f._deckText = dt
 
-    f._deckTextHandle = MakeTextDragHandle(f, dt, icon,
+    f._deckTextHandle = MakeTextDragHandle(f, dt, function() return TextAnchor(f, IconDB(id).deckAnchor) end,
         function() return IconDB(id) end, "deckOffX", "deckOffY",
         function() UpdateIcon(entry) end)
 
@@ -551,8 +1043,31 @@ local function BuildIconWidget(entry)
     pt:SetDrawLayer("OVERLAY", 2)
     f._procText = pt
 
-    f._procTextHandle = MakeTextDragHandle(f, pt, icon,
+    f._procTextHandle = MakeTextDragHandle(f, pt, function() return TextAnchor(f, IconDB(id).procAnchor) end,
         function() return IconDB(id) end, "procOffX", "procOffY",
+        function() UpdateIcon(entry) end)
+
+    -- Timer entries (Nature's Guardian) draw a real Cooldown over the icon and
+    -- hand it a duration object. WoW renders the swipe AND the countdown text
+    -- itself, so the remaining time is never read, compared or stored in Lua --
+    -- which is what keeps it correct under instance cooldown secrecy.
+    if entry.isTimer then
+        local cd = CreateFrame("Cooldown", nil, f, "CooldownFrameTemplate")
+        cd:SetAllPoints(icon)
+        f._ngCooldown = cd
+    end
+
+    local ct = f:CreateFontString(nil, "OVERLAY")
+    ct:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", db.chanceSize or 19, "OUTLINE")
+    ct:SetPoint("CENTER", icon, "CENTER", db.chanceOffX or 0, db.chanceOffY or -27)
+    ct:SetTextColor(db.chanceR or 1, db.chanceG or 1, db.chanceB or 1)
+    ct:SetDrawLayer("OVERLAY", 2)
+    ct:SetText("")
+    ct:SetShown(db.showChanceText == true)
+    f._chanceText = ct
+
+    f._chanceTextHandle = MakeTextDragHandle(f, ct, function() return TextAnchor(f, IconDB(id).chanceAnchor) end,
+        function() return IconDB(id) end, "chanceOffX", "chanceOffY",
         function() UpdateIcon(entry) end)
 
     local vt = f:CreateFontString(nil, "OVERLAY")
@@ -564,7 +1079,7 @@ local function BuildIconWidget(entry)
     vt:SetShown(db.showViolations == true)
     f._violText = vt
 
-    f._violTextHandle = MakeTextDragHandle(f, vt, icon,
+    f._violTextHandle = MakeTextDragHandle(f, vt, function() return TextAnchor(f, IconDB(id).violAnchor) end,
         function() return IconDB(id) end, "violOffX", "violOffY",
         function() UpdateIcon(entry) end)
 
@@ -664,11 +1179,109 @@ local function BuildDeckOptionsGroup(entry)
     local UIHIDE = entry.uiHide or {}
     local function L(key, default) return UI[key] or default end
     -- hidden() that also respects the deck's own opt-out
+    -- A timer entry has no deck, so every deck-shaped row hides with it.
+    -- Deck-only rows that do NOT go through H(). Kept as its own helper so the
+    -- next deck-specific option added here has an obvious thing to use.
+    local function notTimer()
+        return function() return iconHidden() or entry.isTimer end
+    end
     local function H(key)
-        return function() return iconHidden() or UIHIDE[key] == true end
+        return function()
+            return iconHidden() or entry.isTimer or UIHIDE[key] == true
+        end
+    end
+    -- chance rows: hidden unless this deck can compute one AND it is switched on
+    local function CH()
+        return function()
+            return iconHidden() or not entry.GetChanceText or db().showChanceText ~= true
+        end
+    end
+    -- the threshold rows on top of that: only in "chance" colour mode
+    local function CHC()
+        return function()
+            return CH()() or (db().chanceColorMode or "fixed") ~= "chance"
+        end
+    end
+    -- ATTACH TO: build the two rows (preset picker + custom ID) that let one
+    -- text ride a CDM icon instead of this widget's own. Shared by all four
+    -- texts rather than written out per text, because they differ only by key.
+    local function AnchorRows(args, key, order0, visible)
+        -- One list, two kinds: Cooldown Manager icons and action bar buttons.
+        local opts = {}
+        for _, p in ipairs(entry.cdmAnchors or {}) do
+            opts[#opts + 1] = { spec = "cdm:" .. p.id, name = p.name .. "  (CDM)" }
+        end
+        for _, p in ipairs(entry.actionAnchors or {}) do
+            opts[#opts + 1] = { spec = "action:" .. table.concat(p.ids, ","),
+                                name = p.name .. "  (action bar)" }
+        end
+        local function cur()
+            local v = db()[key]
+            if type(v) == "number" then return (v == 0) and "0" or ("cdm:" .. v) end
+            return v or "0"
+        end
+        local function isCustom()
+            local v = cur()
+            if v == "0" then return false end
+            for _, o in ipairs(opts) do if o.spec == v then return false end end
+            return true
+        end
+        args[key] = {
+            type = "select", name = "Attach To",
+            desc = "Where this text sits."
+                .. "|n|n|cff8298b4This icon keeps it on the ProcTracker widget. Attach it to a Cooldown Manager icon or one of your action bar buttons and the text rides that instead, moving wherever you put your bars. If the target is not up (talent not taken, spell not on your bars, or an inactive bar page) the text falls back to this widget rather than disappearing.|r",
+            order = order0, width = 1.5,
+            hidden = visible,
+            values = function()
+                local t = { ["0"] = "This icon" }
+                for _, o in ipairs(opts) do t[o.spec] = o.name end
+                t["custom"] = "Custom cooldown ID..."
+                return t
+            end,
+            sorting = function()
+                local s = { "0" }
+                for _, o in ipairs(opts) do s[#s + 1] = o.spec end
+                s[#s + 1] = "custom"
+                return s
+            end,
+            get = function() return isCustom() and "custom" or cur() end,
+            set = function(_, v)
+                -- "custom" is a sentinel, not a value: keep whatever is already
+                -- set so choosing it does not wipe the ID being edited
+                if v == "custom" then
+                    if not isCustom() then db()[key] = "cdm:1" end
+                else
+                    db()[key] = v
+                end
+                refresh()
+            end,
+        }
+        args[key .. "Custom"] = {
+            type = "input", name = "Cooldown ID",
+            desc = "The CDM cooldownID to attach to. ArcUI's Show IDs on Hover shows these on a Cooldown Manager icon.",
+            order = order0 + 0.001, width = 1.0,
+            hidden = function()
+                if visible() then return true end
+                return not isCustom()
+            end,
+            get = function() return (cur():match("(%d+)")) or "" end,
+            set = function(_, v)
+                local n = tonumber(v)
+                if not n then return end
+                db()[key] = "cdm:" .. math.floor(n)
+                refresh()
+            end,
+        }
     end
 
-    return {
+    -- the procs-left colour rows: only in "procs" colour mode
+    local function CHP()
+        return function()
+            return CH()() or (db().chanceColorMode or "fixed") ~= "procs"
+        end
+    end
+
+    local T = {
         type = "group",
         name = entry.name,
         args = {
@@ -790,7 +1403,7 @@ local function BuildDeckOptionsGroup(entry)
                 type  = "toggle", name = "Unlock Texts (Drag to Position)",
                 desc  = "Enables click-and-drag on the deck, proc, and violation texts. A faint blue overlay marks the draggable area. Disable to lock and click-through.",
                 order = o(), width = "half",
-                hidden = iconHidden,
+                hidden = notTimer(),
                 get   = function() return db().textsUnlocked == true end,
                 set   = function(_, v)
                     db().textsUnlocked = v
@@ -801,7 +1414,7 @@ local function BuildDeckOptionsGroup(entry)
                 type  = "toggle", name = "Desaturate when no procs left",
                 desc  = "Desaturates the icon texture when proc count is 0.",
                 order = o(), width = "half",
-                hidden = iconHidden,
+                hidden = notTimer(),
                 get   = function() return db().desaturateEmpty == true end,
                 set   = function(_, v)
                     db().desaturateEmpty = v
@@ -986,23 +1599,35 @@ local function BuildDeckOptionsGroup(entry)
             -- ── DECK POSITION TEXT ────────────────────────────────────────────
             deckTextHeader = {
                 type = "header", name = L("deckTextHeader", "Deck Position Text"), order = o(),
-                hidden = iconHidden,
+                hidden = function() return iconHidden() or entry.isTimer end,
             },
             deckTextNote = {
                 type = "description", name = L("deckTextNote", ""), order = o(),
                 hidden = function() return iconHidden() or L("deckTextNote", "") == "" end,
             },
+            showDeckText = {
+                type  = "toggle", name = "Show Deck Position",
+                desc  = "Draw the card position on the icon.",
+                order = o(), width = "full",
+                hidden = H("showDeckText"),
+                get   = function() return db().showDeckText ~= false end,
+                set   = function(_, v) db().showDeckText = v; refresh() end,
+            },
             countDown = {
                 type  = "toggle", name = "Count Down  (600 to 0)",
                 order = o(), width = "half",
-                hidden = H("countDown"),
+                hidden = function()
+                    return H("countDown")() or db().showDeckText == false
+                end,
                 get   = function() return db().countDown end,
                 set   = function(_, v) db().countDown = v; refresh() end,
             },
             showDeckSuffix = {
                 type  = "toggle", name = "Show /" .. entry.deckSize .. " suffix",
                 order = o(), width = "half",
-                hidden = H("showDeckSuffix"),
+                hidden = function()
+                    return H("showDeckSuffix")() or db().showDeckText == false
+                end,
                 get   = function() return db().showDeckSuffix end,
                 set   = function(_, v) db().showDeckSuffix = v; refresh() end,
             },
@@ -1076,16 +1701,26 @@ local function BuildDeckOptionsGroup(entry)
             -- ── PROC COUNT TEXT ───────────────────────────────────────────────
             procTextHeader = {
                 type = "header", name = L("procTextHeader", "Proc Count"), order = o(),
-                hidden = iconHidden,
+                hidden = function() return iconHidden() or entry.isTimer end,
             },
             procTextNote = {
                 type = "description", name = L("procTextNote", ""), order = o(),
                 hidden = function() return iconHidden() or L("procTextNote", "") == "" end,
             },
+            showProcText = {
+                type  = "toggle", name = "Show Proc Count",
+                desc  = "Draw the proc counter on the icon.",
+                order = o(), width = "full",
+                hidden = H("showProcText"),
+                get   = function() return db().showProcText ~= false end,
+                set   = function(_, v) db().showProcText = v; refresh() end,
+            },
             procCountDown = {
                 type  = "toggle", name = "Count Down  (3 to 0)",
                 order = o(), width = "half",
-                hidden = H("procCountDown"),
+                hidden = function()
+                    return H("procCountDown")() or db().showProcText == false
+                end,
                 get   = function() return db().procCountDown end,
                 set   = function(_, v) db().procCountDown = v; refresh() end,
             },
@@ -1183,6 +1818,186 @@ local function BuildDeckOptionsGroup(entry)
                 get  = function() return db().fullR, db().fullG, db().fullB end,
                 set  = function(_, r, g, b)
                     local d = db(); d.fullR=r; d.fullG=g; d.fullB=b; refresh()
+                end,
+            },
+
+            -- ── PROC CHANCE TEXT ──────────────────────────────────────────────
+            -- Only offered by decks that can work out a chance (GetChanceText).
+            chanceHeader = {
+                type = "header", name = "Proc Chance Text", order = o(),
+                hidden = function() return iconHidden() or not entry.GetChanceText end,
+            },
+            showChanceText = {
+                type  = "toggle", name = "Show Proc Chance",
+                desc  = "The odds your NEXT spender procs, from the cards and procs left in the deck."
+                     .. "|n|nA spender that runs off the end of the deck keeps drawing into the next one, so this never sits at a flat zero just because the current deck is spent.",
+                order = o(), width = "full",
+                hidden = function() return iconHidden() or not entry.GetChanceText end,
+                get   = function() return db().showChanceText == true end,
+                set   = function(_, v)
+                    db().showChanceText = v
+                    local w = entry.widget
+                    if w and w._chanceText then w._chanceText:SetShown(v) end
+                    UpdateIcon(entry)
+                end,
+            },
+            chanceSpend = {
+                type = "range", name = "Spender Maelstrom Cost",
+                desc = "How many Maelstrom Weapon stacks your next spender is assumed to eat. Enhancement spends a full 10.",
+                order = o(), width = 1.2,
+                min = 1, max = 10, step = 1,
+                hidden = function() return CH()() or not entry.chanceSpendSlider end,
+                get = function() return db().chanceSpend or 10 end,
+                set = function(_, v) db().chanceSpend = v; refresh() end,
+            },
+            chanceForecast = {
+                type = "select", name = "Forecast",
+                desc = "Which spender the chance assumes you will cast next."
+                    .. "|n|n|cff8298b4Instant, follow casts assumes Earth Shock or Earthquake while nothing is on the cast bar, and switches to Elemental Blast the moment you start casting it. Costs are read from the game, so Eye of the Storm is already accounted for.|r",
+                order = o(), width = 1.4,
+                hidden = function() return CH()() or not entry.chanceForecastPicker end,
+                values  = {
+                    auto    = "Instant, follow casts",
+                    instant = "Instant only",
+                    blast   = "Elemental Blast only",
+                },
+                sorting = { "auto", "instant", "blast" },
+                get = function() return db().chanceForecast or "auto" end,
+                set = function(_, v) db().chanceForecast = v; refresh() end,
+            },
+            chanceForecastNote = {
+                type = "description", order = o(), fontSize = "medium",
+                name = function()
+                    return "|cff8298b4Assuming: "
+                        .. (PT.ElemTempest_ForecastLabel and PT.ElemTempest_ForecastLabel() or "?")
+                        .. "|r"
+                end,
+                hidden = function() return CH()() or not entry.chanceForecastPicker end,
+            },
+            chanceDecimals = {
+                type = "toggle", name = "Show a decimal  (4.9% not 5%)",
+                order = o(), width = 1.4,
+                hidden = CH(),
+                get = function() return db().chanceDecimals ~= false end,
+                set = function(_, v) db().chanceDecimals = v; refresh() end,
+            },
+            chanceColorMode = {
+                type = "select", name = "Colour By",
+                desc = "|cff8298b4Fixed keeps one colour. Procs left reuses the proc counter's own colours, so both readouts agree. Chance colours by the percentage itself, using the thresholds below.|r",
+                order = o(), width = 1.2,
+                hidden = CH(),
+                values  = { fixed = "Fixed colour", procs = "Procs left", chance = "Chance" },
+                sorting = { "fixed", "procs", "chance" },
+                get = function() return db().chanceColorMode or "fixed" end,
+                set = function(_, v) db().chanceColorMode = v; refresh() end,
+            },
+            chanceColor = {
+                type = "color", name = "Colour", order = o(), width = "half", hasAlpha = false,
+                hidden = function()
+                    return CH()() or (db().chanceColorMode or "fixed") ~= "fixed"
+                end,
+                get = function() return db().chanceR or 1, db().chanceG or 1, db().chanceB or 1 end,
+                set = function(_, r, g, b)
+                    local d = db(); d.chanceR=r; d.chanceG=g; d.chanceB=b; refresh()
+                end,
+            },
+            -- Each threshold sits directly under the colour it switches on, so
+            -- the pair reads as one rule instead of two disconnected sliders.
+            chanceColdColor = {
+                type = "color", name = "Low Colour", order = o(), width = "half", hasAlpha = false,
+                hidden = CHC(),
+                get = function() return db().chanceColdR or 0.6, db().chanceColdG or 0.6, db().chanceColdB or 0.6 end,
+                set = function(_, r, g, b)
+                    local d = db(); d.chanceColdR=r; d.chanceColdG=g; d.chanceColdB=b; refresh()
+                end,
+            },
+            chanceLowPct = {
+                type = "input", name = "Low Below (%)",
+                desc = "Use the low colour while the chance is under this.",
+                order = o(), width = 1.0,
+                hidden = CHC(),
+                get = function() return tostring(db().chanceLowPct or 3) end,
+                set = function(_, v)
+                    local n = tonumber(v); if not n then return end
+                    if n < 0 then n = 0 elseif n > 100 then n = 100 end
+                    db().chanceLowPct = n; refresh()
+                end,
+            },
+            chanceMidColor = {
+                type = "color", name = "Mid Colour", order = o(), width = "half", hasAlpha = false,
+                hidden = CHC(),
+                get = function() return db().chanceMidR or 1, db().chanceMidG or 0.82, db().chanceMidB or 0 end,
+                set = function(_, r, g, b)
+                    local d = db(); d.chanceMidR=r; d.chanceMidG=g; d.chanceMidB=b; refresh()
+                end,
+            },
+            chanceHotColor = {
+                type = "color", name = "High Colour", order = o(), width = "half", hasAlpha = false,
+                hidden = CHC(),
+                get = function() return db().chanceHotR or 0, db().chanceHotG or 1, db().chanceHotB or 0 end,
+                set = function(_, r, g, b)
+                    local d = db(); d.chanceHotR=r; d.chanceHotG=g; d.chanceHotB=b; refresh()
+                end,
+            },
+            chanceHighPct = {
+                type = "input", name = "High At (%)",
+                desc = "Use the high colour once the chance reaches this.",
+                order = o(), width = 1.0,
+                hidden = CHC(),
+                get = function() return tostring(db().chanceHighPct or 10) end,
+                set = function(_, v)
+                    local n = tonumber(v); if not n then return end
+                    if n < 0 then n = 0 elseif n > 100 then n = 100 end
+                    db().chanceHighPct = n; refresh()
+                end,
+            },
+
+            -- "Procs left" mode: one colour row per proc count, generated
+            -- after this table from entry.procs (see the loop below).
+            chanceFont = {
+                type = "select", name = "Font",
+                desc = "Font for the proc chance text. Includes fonts shared by other addons, such as ArcUI.",
+                order = o(), width = 1.2,
+                dialogControl = "LSM30_Font",
+                hidden = function() return CH()() or not PT.HasSharedMedia() end,
+                values = function() return PT.FontValues() end,
+                get  = function() return db().chanceFont end,
+                set  = function(_, v) db().chanceFont = v; PT.ApplyIconFonts(entry); refresh() end,
+            },
+            chanceSize = {
+                type = "range", name = "Font Size",
+                min = 6, max = 40, step = 1,
+                order = o(), width = "half",
+                hidden = CH(),
+                get  = function() return db().chanceSize or 19 end,
+                set  = function(_, v) db().chanceSize = v; refresh() end,
+            },
+            chanceOffX = {
+                type = "range", name = "Offset X",
+                min = -100, max = 100, step = 1,
+                order = o(), width = "half",
+                hidden = CH(),
+                get  = function() return db().chanceOffX or 0 end,
+                set  = function(_, v)
+                    db().chanceOffX = v; refresh()
+                    local w = entry.widget
+                    if w and w._chanceTextHandle and w._chanceTextHandle._resync then
+                        w._chanceTextHandle._resync()
+                    end
+                end,
+            },
+            chanceOffY = {
+                type = "range", name = "Offset Y",
+                min = -100, max = 100, step = 1,
+                order = o(), width = "half",
+                hidden = CH(),
+                get  = function() return db().chanceOffY or -27 end,
+                set  = function(_, v)
+                    db().chanceOffY = v; refresh()
+                    local w = entry.widget
+                    if w and w._chanceTextHandle and w._chanceTextHandle._resync then
+                        w._chanceTextHandle._resync()
+                    end
                 end,
             },
 
@@ -1350,6 +2165,272 @@ local function BuildDeckOptionsGroup(entry)
             },
         },
     }
+
+    -- PER-PROC-COUNT COLOUR ROWS. Generated rather than written out because
+    -- deck sizes differ (3 for Doom Winds, 5 for Storm Unleashed, 1 for
+    -- Soulburst), so the number of rows is a property of the deck. Listed
+    -- from a full deck down to a spent one, the order it actually depletes in.
+    do
+        local maxProcs = entry.procs or 1
+        local args = T.args.icon and T.args.icon.args or T.args
+        -- Anchor the generated rows to the option they follow. o() only ever
+        -- counts UP, and this loop runs AFTER the whole table is built, so
+        -- calling o() here would order these rows past every later section and
+        -- drop them under Border instead of in Proc Chance Text. Fractional
+        -- offsets off the High At row keep them exactly where the fixed
+        -- swatches used to sit.
+        local base = (args.chanceHighPct and args.chanceHighPct.order) or 0
+        local k = 0
+        for left = maxProcs, 0, -1 do
+            local n = left
+            k = k + 1
+            local label
+            if n == 0 then label = "No Procs Left"
+            elseif n == 1 then label = "1 Proc Left"
+            else label = n .. " Procs Left" end
+            args["chanceCount" .. n] = {
+                type = "color", name = label, order = base + k * 0.001, width = "half", hasAlpha = false,
+                hidden = CHP(),
+                get = function()
+                    return PT.CountColor(db(), n, maxProcs)
+                end,
+                set = function(_, r, g, b)
+                    local d = db()
+                    d.chanceCountColors = d.chanceCountColors or {}
+                    d.chanceCountColors[n] = { r, g, b }
+                    refresh()
+                end,
+            }
+        end
+    end
+    -- STATE VISUAL sections, timer entries only. Generated per state rather than
+    -- written out twice: the two differ only by prefix and label.
+    if entry.isTimer then
+        local args = T.args.icon and T.args.icon.args or T.args
+        -- COOLDOWN ANIMATION, before the state sections: it describes the sweep
+        -- itself rather than either state's look.
+        do
+            local function on() return iconHidden() end
+            args.swipeHeader = {
+                type = "header", name = "Cooldown Animation", order = o(), hidden = on,
+            }
+            args.swipeNote = {
+                type = "description", order = o(), fontSize = "medium",
+                name = "|cff8298b4The sweep the game draws over the icon while the cooldown runs.|r",
+                hidden = on,
+            }
+            args.swipeShow = {
+                type = "toggle", name = "Show Sweep", order = o(), width = 1.2, hidden = on,
+                get = function() return db().swipeShow ~= false end,
+                set = function(_, v) db().swipeShow = v; refresh() end,
+            }
+            args.swipeColor = {
+                type = "color", name = "Sweep Colour", order = o(), width = "half",
+                hasAlpha = true,
+                hidden = function() return on() or db().swipeShow == false end,
+                get = function()
+                    local d = db()
+                    return d.swipeR or 0, d.swipeG or 0, d.swipeB or 0,
+                           (type(d.swipeA) == "number") and d.swipeA or 0.8
+                end,
+                set = function(_, r, g, b, a)
+                    local d = db(); d.swipeR, d.swipeG, d.swipeB, d.swipeA = r, g, b, a
+                    refresh()
+                end,
+            }
+            args.swipeEdge = {
+                type = "toggle", name = "Show Edge Line",
+                desc = "The bright line that travels the leading edge of the sweep.",
+                order = o(), width = 1.2, hidden = on,
+                get = function() return db().swipeEdge == true end,
+                set = function(_, v) db().swipeEdge = v; refresh() end,
+            }
+            args.swipeNumbers = {
+                type = "toggle", name = "Show Countdown Numbers",
+                order = o(), width = 1.4, hidden = on,
+                get = function() return db().swipeNumbers ~= false end,
+                set = function(_, v) db().swipeNumbers = v; refresh() end,
+            }
+            args.swipeBling = {
+                type = "toggle", name = "Finish Flash",
+                desc = "The flash the game plays as the cooldown ends.",
+                order = o(), width = 1.2, hidden = on,
+                get = function() return db().swipeBling ~= false end,
+                set = function(_, v) db().swipeBling = v; refresh() end,
+            }
+            args.swipeReverse = {
+                type = "toggle", name = "Reverse Sweep",
+                desc = "Fill the icon as the cooldown runs down instead of unfilling it.",
+                order = o(), width = 1.2, hidden = on,
+                get = function() return db().swipeReverse == true end,
+                set = function(_, v) db().swipeReverse = v; refresh() end,
+            }
+            args.swipePreview = {
+                type = "execute", name = "Preview Sweep",
+                desc = "Run a short cooldown on the icon so you can see the sweep,"
+                    .. " the edge line and the finish flash.",
+                order = o(), width = 1.4, hidden = on,
+                func = function() PT.PreviewState(entry, "cd") end,
+            }
+        end
+
+        local STATES = {
+            { p = "rdy", title = "Ready State",
+              note = "How the icon looks while the proc is available." },
+            { p = "cd",  title = "On Cooldown State",
+              note = "How the icon looks while the internal cooldown is running." },
+        }
+        for _, st in ipairs(STATES) do
+            local p = st.p
+            local function on() return iconHidden() end
+            args[p .. "Header"] = {
+                type = "header", name = st.title, order = o(),
+                hidden = on,
+            }
+            args[p .. "Note"] = {
+                type = "description", order = o(), fontSize = "medium",
+                name = "|cff8298b4" .. st.note .. "|r", hidden = on,
+            }
+            args[p .. "Alpha"] = {
+                type = "range", name = "Opacity", min = 0, max = 1, step = 0.05,
+                order = o(), width = 1.2, hidden = on,
+                get = function() local v = db()[p .. "Alpha"]; return (type(v) == "number") and v or 1 end,
+                set = function(_, v) db()[p .. "Alpha"] = v; refresh() end,
+            }
+            args[p .. "Desat"] = {
+                type = "toggle", name = "Desaturate",
+                desc = "Grey the icon out, the way the game does for a spell on cooldown.",
+                order = o(), width = 1.2, hidden = on,
+                get = function() return db()[p .. "Desat"] == true end,
+                set = function(_, v) db()[p .. "Desat"] = v; refresh() end,
+            }
+            args[p .. "Tint"] = {
+                type = "toggle", name = "Tint", order = o(), width = 1.2, hidden = on,
+                get = function() return db()[p .. "Tint"] == true end,
+                set = function(_, v) db()[p .. "Tint"] = v; refresh() end,
+            }
+            args[p .. "TintColor"] = {
+                type = "color", name = "Tint Colour", order = o(), width = "half",
+                hasAlpha = false,
+                hidden = function() return on() or db()[p .. "Tint"] ~= true end,
+                get = function() return db()[p .. "TintR"] or 1, db()[p .. "TintG"] or 1, db()[p .. "TintB"] or 1 end,
+                set = function(_, r, g, b)
+                    local d = db(); d[p .. "TintR"], d[p .. "TintG"], d[p .. "TintB"] = r, g, b
+                    refresh()
+                end,
+            }
+            args[p .. "Glow"] = {
+                type = "toggle", name = "Glow", order = o(), width = 1.2, hidden = on,
+                get = function() return db()[p .. "Glow"] == true end,
+                set = function(_, v) db()[p .. "Glow"] = v; refresh() end,
+            }
+            args[p .. "GlowStyle"] = {
+                type = "select", name = "Glow Style", order = o(), width = 1.2,
+                hidden = function() return on() or db()[p .. "Glow"] ~= true end,
+                values  = {
+                    pixel    = "Pixel Glow",
+                    autocast = "AutoCast Sparkles",
+                    button   = "Button Glow",
+                    proc     = "Blizzard Proc",
+                    procloop = "Proc Loop (no burst)",
+                },
+                sorting = { "button", "pixel", "autocast", "proc", "procloop" },
+                get = function() return db()[p .. "GlowStyle"] or "pixel" end,
+                set = function(_, v) db()[p .. "GlowStyle"] = v; refresh() end,
+            }
+            args[p .. "GlowColor"] = {
+                type = "color", name = "Glow Colour", order = o(), width = "half",
+                hasAlpha = false,
+                hidden = function() return on() or db()[p .. "Glow"] ~= true end,
+                get = function() return db()[p .. "GlowR"] or 0.95, db()[p .. "GlowG"] or 0.95, db()[p .. "GlowB"] or 0.32 end,
+                set = function(_, r, g, b)
+                    local d = db(); d[p .. "GlowR"], d[p .. "GlowG"], d[p .. "GlowB"] = r, g, b
+                    refresh()
+                end,
+            }
+            -- SUPPORT MATRIX: every style honours a different subset, so a knob
+            -- that would do nothing is hidden rather than shown dead. Mirrors
+            -- ArcUI's GetSupportedOpts.
+            local function glowOn() return on() or db()[p .. "Glow"] ~= true end
+            local function styleIs(...)
+                local want = { ... }
+                return function()
+                    if glowOn() then return true end
+                    local cur = db()[p .. "GlowStyle"] or "pixel"
+                    for i = 1, #want do if want[i] == cur then return false end end
+                    return true
+                end
+            end
+            local function num(key, label, desc, mn, mx, step, dflt, hide)
+                args[p .. key] = {
+                    type = "range", name = label, desc = desc,
+                    order = o(), width = 1.2,
+                    min = mn, max = mx, step = step,
+                    hidden = hide,
+                    get = function()
+                        local v = db()[p .. key]
+                        return (type(v) == "number") and v or dflt
+                    end,
+                    set = function(_, v) db()[p .. key] = v; refresh() end,
+                }
+            end
+            -- shared by every style
+            num("GlowPad", "Glow Size",
+                "Grows the glow outward from the icon edge.", -16, 32, 1, 0, glowOn)
+            num("GlowX", "Glow Offset X",
+                "Moves the glow. Separate from Glow Size, which only expands it.",
+                -50, 50, 1, 0, glowOn)
+            num("GlowY", "Glow Offset Y",
+                "Moves the glow. Separate from Glow Size, which only expands it.",
+                -50, 50, 1, 0, glowOn)
+            num("GlowSpeed", "Animation Speed", nil, 0.01, 2, 0.01, 0.25,
+                styleIs("pixel", "autocast", "button"))
+            -- pixel only
+            num("GlowLines", "Lines", "How many line segments travel the border.",
+                1, 30, 1, 8, styleIs("pixel"))
+            num("GlowLength", "Line Length", "0 sizes each line from the icon.",
+                0, 30, 1, 0, styleIs("pixel"))
+            num("GlowThick", "Line Thickness", nil, 1, 12, 1, 2, styleIs("pixel"))
+            args[p .. "GlowBorder"] = {
+                type = "toggle", name = "Draw Behind Border",
+                order = o(), width = 1.2, hidden = styleIs("pixel"),
+                get = function() return db()[p .. "GlowBorder"] == true end,
+                set = function(_, v) db()[p .. "GlowBorder"] = v; refresh() end,
+            }
+            -- autocast only
+            num("GlowParticles", "Sparkle Count", nil, 1, 20, 1, 4, styleIs("autocast"))
+            num("GlowScale", "Sparkle Scale", nil, 0.2, 3, 0.05, 1, styleIs("autocast"))
+            -- proc only
+            num("GlowDuration", "Animation Duration", nil, 0.1, 5, 0.1, 1,
+                styleIs("proc", "procloop"))
+            args[p .. "Preview"] = {
+                type = "execute", name = "Preview This State",
+                desc = "Hold the icon in this state for a few seconds so you can"
+                    .. " see the look without waiting for it to happen.",
+                order = o(), width = 1.4, hidden = on,
+                func = function() PT.PreviewState(entry, p) end,
+            }
+        end
+    end
+
+    -- ATTACH TO rows for each text, anchored just under the option they follow
+    -- (o() only counts up and this runs after the table is built, so calling it
+    -- here would order these past every later section).
+    do
+        local args = T.args.icon and T.args.icon.args or T.args
+        local function after(k, fallback)
+            local a = args[k]
+            return (a and a.order) or fallback
+        end
+        AnchorRows(args, "deckAnchor",   after("showDeckSuffix", 0) + 0.0005,
+            function() return iconHidden() or db().showDeckText == false end)
+        AnchorRows(args, "procAnchor",   after("showProcSuffix", 0) + 0.0005,
+            function() return iconHidden() or db().showProcText == false end)
+        AnchorRows(args, "chanceAnchor", after("chanceOffY", 0) + 0.0005, CH())
+        AnchorRows(args, "violAnchor",   after("violOffY", 0) + 0.0005,
+            function() return iconHidden() or not db().showViolations end)
+    end
+    return T
 end
 
 local optionsRegistered = false
@@ -1483,13 +2564,10 @@ local function BuildMasterOptionsTable()
                 procHeader = {
                     type = "header", name = "Proc Sound", order = 0,
                 },
-                procDesc = {
-                    type = "description", order = 0.5, fontSize = "medium",
-                    name = "Play a sound the moment a proc comes off this deck.",
-                },
                 procEnabled = {
                     type  = "toggle", name = "Enable Proc Sound",
-                    desc  = "Turn the proc sound on and off. Your chosen sound is kept either way, so you can silence it for one pull and switch it back on without picking it again.",
+                    desc  = "Play a sound the moment a proc comes off this deck."
+                         .. "|n|nYour chosen sound is kept when this is off, so you can silence it for one pull and switch it back on without picking it again.",
                     order = 1, width = 1.4,
                     get   = function() return sdb().procSoundEnabled and true or false end,
                     set   = function(_, v)
@@ -1652,7 +2730,11 @@ local function BuildMasterOptionsTable()
             childGroups = "tab",
             args        = {
                 icon  = iconGroup,
-                bar   = barGroup or {
+                -- A timer entry has no deck, so the Bar tab (which plots deck
+                -- position) and the Behavior tab (deck reset, violations,
+                -- rollover) have nothing to say about it. Omitted rather than
+                -- shown empty.
+                bar   = (not entry.isTimer) and (barGroup or {
                     type = "group", name = "Bar", order = 2,
                     args = {
                         noBar = {
@@ -1660,12 +2742,12 @@ local function BuildMasterOptionsTable()
                             name = "|cff888888Bar module not loaded.|r",
                         }
                     }
-                },
+                }) or nil,
                 -- Only decks whose proc site calls PT.Sounds.PlayFor get this
                 -- tab. Showing it everywhere would offer a sound that never
                 -- plays on the decks that are not wired up yet.
                 sounds = entry.hasProcSound and soundsGroup or nil,
-                reset = behaviorGroup,
+                reset = (not entry.isTimer) and behaviorGroup or nil,
             },
         }
         args[entry.id] = deckTab
@@ -2026,6 +3108,8 @@ end)
 local _ptCDMRehookPending = false
 
 local function InvalidateAllCDMFrames()
+    -- a CDM reshuffle moves cooldownIDs between pooled frames
+    PT.InvalidateAnchorCache()
     -- Always invalidate immediately so IsCDMTracking is accurate and rehook fires.
     for _, entry in ipairs(registry) do
         if not entry.noCDMWarn then
@@ -2048,6 +3132,11 @@ local function SchedulePTCDMRehook()
             local ns = GetDeckNS(entry.id)
             if ns and ns.RehookCDM then ns.RehookCDM() end
         end
+        -- Re-anchor immediately as well: a text riding a CDM icon is pointed at
+        -- a POOLED frame, and after a reshuffle that frame may now belong to a
+        -- different cooldown. Waiting for the 1s settle would leave the text
+        -- sitting on the wrong icon in the meantime.
+        UpdateIcon(entry)
     end
     C_Timer.After(1.0, function()
         _ptCDMRehookPending = false
@@ -2063,6 +3152,20 @@ local function SchedulePTCDMRehook()
         end
     end)
 end
+
+-- Action buttons MOVE without being destroyed: bar paging, stance swaps and
+-- vehicles all change which slot a button shows. A text riding a button would
+-- otherwise stay put and end up on whatever occupies it next, so re-resolve on
+-- the same events the bars themselves react to. Event-driven, no polling.
+local ptBarWatch = CreateFrame("Frame")
+ptBarWatch:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+ptBarWatch:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
+ptBarWatch:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+ptBarWatch:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
+ptBarWatch:SetScript("OnEvent", function()
+    PT.InvalidateAnchorCache()
+    for _, entry in ipairs(registry) do UpdateIcon(entry) end
+end)
 
 local function InstallCDMMixinHooks()
     -- Hook SetCooldownID on the mixin — fires during RefreshData after ReleaseAll

@@ -29,6 +29,14 @@ local MAELSTROM_SPENDERS = {
     [117014] = "Elemental Blast",
 }
 local ASC_SPELL_ID = 114050
+-- Spender IDs used by the proc-chance forecast. Declared HERE, with the other
+-- constants, because the cast-tracking event handler below references them --
+-- declared further down they would compile as globals and silently read nil,
+-- which luac cannot catch and which would break cast tracking with no error.
+local ELEMENTAL_BLAST = 117014
+local EARTH_SHOCK     = 8042
+local EARTHQUAKE      = 462620
+local EARTHQUAKE_ALT  = 61882
 
 local TEMPEST_NODE_ID  = 94892
 local TEMPEST_ENTRY_ID = 117489
@@ -36,6 +44,10 @@ local TEMPEST_ENTRY_ID = 117489
 local elemTotalMaelstrom    = 0
 local elemDeckNumber        = 1
 local elemDeckProcs         = 0
+-- True while Elemental Blast is actually being cast. The proc chance answers
+-- "what will my NEXT cast do", and EB is the only spender with a cast time --
+-- which makes it the one moment the next spend is KNOWN rather than assumed.
+local elemCastingBlast      = false
 local elemPrevDeckProcs     = 0
 local elemPrevPrevDeckProcs = 0
 local elemGainCount         = 0
@@ -218,8 +230,31 @@ end
 
 local elemEventFrame = CreateFrame("Frame")
 elemEventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+-- Cast-bar tracking for the proc-chance forecast. Player spellcast events are
+-- NON-SECRET even in combat and instances, so this is safe everywhere. Purely
+-- event-driven: no polling, and the icon only redraws on an actual transition.
+elemEventFrame:RegisterUnitEvent("UNIT_SPELLCAST_START", "player")
+elemEventFrame:RegisterUnitEvent("UNIT_SPELLCAST_STOP", "player")
+elemEventFrame:RegisterUnitEvent("UNIT_SPELLCAST_INTERRUPTED", "player")
 elemEventFrame:SetScript("OnEvent", function(self, event, unit, _, spellID)
     if unit ~= "player" then return end
+
+    if event == "UNIT_SPELLCAST_START"
+    or event == "UNIT_SPELLCAST_STOP"
+    or event == "UNIT_SPELLCAST_INTERRUPTED" then
+        if spellID ~= ELEMENTAL_BLAST then return end
+        local casting = (event == "UNIT_SPELLCAST_START")
+        if casting ~= elemCastingBlast then
+            elemCastingBlast = casting
+            PT.UpdateDeck("elemtempest")
+        end
+        return
+    end
+
+    if spellID == ELEMENTAL_BLAST and elemCastingBlast then
+        -- SUCCEEDED closes the cast; STOP usually follows, but do not rely on it
+        elemCastingBlast = false
+    end
     if spellID == ASC_SPELL_ID then
         local cost = GetMaelstromCost(spellID)
         EDbg("SPELLCAST ASC", "spellID="..spellID.." cost="..cost)
@@ -239,6 +274,7 @@ local function Reset()
     elemTotalMaelstrom    = 0
     elemDeckNumber        = 1
     elemDeckProcs         = 0
+    elemCastingBlast      = false
     elemPrevDeckProcs     = 0
     elemPrevPrevDeckProcs = 0
     elemGainCount         = 0
@@ -265,6 +301,62 @@ end
 
 local function GetDeckPos() return elemTotalMaelstrom % DECK_SIZE end
 local function GetProcs()   return elemDeckProcs end
+
+-- ── Proc chance for the next spender ──────────────────────────────────────────
+-- Unlike Enhancement (always a full 10-stack spender), Elemental has two cost
+-- tiers, so the readout has to take a view on what you will cast NEXT:
+--
+--   auto (default) -- assume an instant (Earth Shock / Earthquake, 60), because
+--                     with nothing on the cast bar that is what can come next.
+--                     While Elemental Blast is being cast, switch to ITS cost:
+--                     for those 1.6s the next spend is not a guess.
+--   instant        -- always the instant cost.
+--   blast          -- always Elemental Blast, for single target where that is
+--                     the only spender that matters.
+--
+-- Every cost is read live via GetMaelstromCost, so Eye of the Storm (-5 on the
+-- instants, -10 on Blast) needs no handling here at all.
+local function InstantCost()
+    for _, id in ipairs({ EARTH_SHOCK, EARTHQUAKE, EARTHQUAKE_ALT }) do
+        local c = GetMaelstromCost(id)
+        if c and c > 0 then return c end
+    end
+    return 60
+end
+
+local function BlastCost()
+    local c = GetMaelstromCost(ELEMENTAL_BLAST)
+    return (c and c > 0) and c or 90
+end
+
+local function ForecastCost()
+    local db = PT.GetIconDB and PT.GetIconDB("elemtempest")
+    local mode = (db and db.chanceForecast) or "auto"
+    if mode == "blast" then return BlastCost() end
+    if mode == "instant" then return InstantCost() end
+    -- auto: the cast bar is the only hard information available
+    if elemCastingBlast then return BlastCost() end
+    return InstantCost()
+end
+
+-- What the forecast is currently assuming, for the options panel to show.
+function PT.ElemTempest_ForecastLabel()
+    local db = PT.GetIconDB and PT.GetIconDB("elemtempest")
+    local mode = (db and db.chanceForecast) or "auto"
+    if mode == "blast" then return "Elemental Blast (" .. BlastCost() .. ")" end
+    if mode == "instant" then return "Instant (" .. InstantCost() .. ")" end
+    return "Instant (" .. InstantCost() .. "), Elemental Blast (" .. BlastCost() .. ") while casting"
+end
+
+local function GetChanceValue()
+    return PT.DeckChance(DECK_SIZE, DECK_PROCS,
+        elemTotalMaelstrom % DECK_SIZE, elemDeckProcs, ForecastCost())
+end
+
+local function GetChanceText()
+    local db = PT.GetIconDB and PT.GetIconDB("elemtempest")
+    return PT.FormatChance(GetChanceValue(), db and db.chanceDecimals)
+end
 
 local function IsTempestTalented()
     local specIndex = GetSpecialization()
@@ -319,6 +411,13 @@ local function TryRegister()
         noCDMWarn   = true,
         GetDeckPos  = GetDeckPos,
         GetProcs    = GetProcs,
+        -- opt-in: Core only offers the Proc Chance Text section to decks that
+        -- can actually compute one
+        GetChanceText  = GetChanceText,
+        GetChanceValue = GetChanceValue,
+        -- this deck's spend size varies, so it picks a forecast instead of a
+        -- fixed spend slider
+        chanceForecastPicker = true,
         OnReset     = Reset,
         OnEnable    = function()
             elemEnabled = true

@@ -1,5 +1,13 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.3.0
+- **Nature's Guardian tracker (new)**: An icon for its 45 second cooldown. Shows only when you have the talent.
+- **Proc chance text (new)**: Every deck can show the odds your next spender procs.
+- **Separate texts**: Deck position, proc count and proc chance each have their own toggle, font, colour and position.
+- **Attach text to other icons**: Any text can ride a Cooldown Manager icon or an action bar button.
+- **Cooldown and glow options**: Sweep, edge line and glow settings with separate ready and on cooldown looks, plus preview buttons.
+- **Cleaner options window**: Controls line up in one column, long dropdowns scroll, and sections no longer draw a stray line.
+
 ## 1.2.0
 - **Proc sounds for Doom Winds**: Play a sound the moment a proc comes off the Doom Winds deck, set up under the deck's new Sounds tab.
 

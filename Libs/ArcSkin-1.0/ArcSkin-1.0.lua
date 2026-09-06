@@ -17,7 +17,7 @@
 -- Consumers: ArcUI_ProcTracker (first), ArcUI (Arc 2.0), future Arc
 -- addons. No pcall. Zero idle CPU (everything click/event driven).
 -- ===================================================================
-local MAJOR, MINOR = "ArcSkin-1.0", 5
+local MAJOR, MINOR = "ArcSkin-1.0", 7
 local AS = LibStub:NewLibrary(MAJOR, MINOR)
 if not AS then return end
 
@@ -46,6 +46,22 @@ local function Skin(f, bg, borderCol)
     f:SetBackdropBorderColor(b[1], b[2], b[3], 1)
 end
 AS.Skin = Skin
+
+-- shared hidden FontString for measuring option-name widths (select
+-- auto-width). Font 11 = the field/value font. Unbounded width, because
+-- GetStringWidth reports an already-truncated width.
+local function MeasureText(text)
+    local fs = AS._measureFS
+    if not fs then
+        fs = UIParent:CreateFontString(nil, "ARTWORK")
+        fs:SetFont(STANDARD_TEXT_FONT, 11, "")
+        fs:Hide()
+        AS._measureFS = fs
+    end
+    fs:SetText(text or "")
+    return (fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth())
+        or fs:GetStringWidth() or 0
+end
 
 -- ── AceConfig helpers ───────────────────────────────────────────────
 local windows = {}   -- appName -> win
@@ -231,13 +247,9 @@ builders.section = function(win)
     row.label = row:CreateFontString(nil, "OVERLAY")
     row.label:SetFont(STANDARD_TEXT_FONT, 10, "")
     row.label:SetPoint("BOTTOMLEFT", 10, 5)
-    row.label:SetTextColor(COL.dim[1], COL.dim[2], COL.dim[3])
-    row.line = row:CreateTexture(nil, "ARTWORK")
-    row.line:SetTexture(WHITE)
-    row.line:SetVertexColor(COL.line[1], COL.line[2], COL.line[3], 0.8)
-    row.line:SetPoint("BOTTOMLEFT", row.label, "BOTTOMRIGHT", 8, 2)
-    row.line:SetPoint("RIGHT", row, "RIGHT", -10, 0)
-    row.line:SetHeight(1)
+    -- CYAN, and no trailing rule: the box below already draws the group
+    -- boundary, so a line here competes with it (theme rule 3)
+    row.label:SetTextColor(COL.arc[1], COL.arc[2], COL.arc[3])
     return row
 end
 
@@ -271,13 +283,7 @@ builders.collapse = function(win)
     row.label = row:CreateFontString(nil, "OVERLAY")
     row.label:SetFont(STANDARD_TEXT_FONT, 10, "")
     row.label:SetPoint("BOTTOMLEFT", 24, 5)
-    row.label:SetTextColor(COL.dim[1], COL.dim[2], COL.dim[3])
-    row.line = row:CreateTexture(nil, "ARTWORK")
-    row.line:SetTexture(WHITE)
-    row.line:SetVertexColor(COL.line[1], COL.line[2], COL.line[3], 0.8)
-    row.line:SetPoint("BOTTOMLEFT", row.label, "BOTTOMRIGHT", 8, 2)
-    row.line:SetPoint("RIGHT", row, "RIGHT", -10, 0)
-    row.line:SetHeight(1)
+    row.label:SetTextColor(COL.arc[1], COL.arc[2], COL.arc[3])
     row:SetScript("OnClick", function(self) if self.onClick then self.onClick(self) end end)
     row:SetScript("OnEnter", function(self) self.label:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3]) end)
     row:SetScript("OnLeave", function(self) self.label:SetTextColor(COL.dim[1], COL.dim[2], COL.dim[3]) end)
@@ -359,10 +365,8 @@ builders.range = function(win)
         return b
     end
     local plusB = MkArrow("+", 1)
-    plusB:SetPoint("RIGHT", -12, 0)
     local box = CreateFrame("EditBox", nil, row, "BackdropTemplate")
     box:SetSize(38, 16)
-    box:SetPoint("RIGHT", plusB, "LEFT", -2, 0)
     Skin(box, COL.well)
     box:SetFont(STANDARD_TEXT_FONT, 11, "")
     box:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3])
@@ -382,12 +386,15 @@ builders.range = function(win)
     box:SetScript("OnEditFocusLost", commitTyped)
     box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     local minusB = MkArrow("-", -1)
-    minusB:SetPoint("RIGHT", box, "LEFT", -2, 0)
     local s = CreateFrame("Slider", nil, row, "BackdropTemplate")
     s:SetOrientation("HORIZONTAL")
     s:SetSize(110, 10)
-    s:SetPoint("RIGHT", minusB, "LEFT", -8, 0)
-    row.label:SetPoint("RIGHT", s, "LEFT", -8, 0)
+    -- provisional; renderRows re-columns the slider and the rest flows off it
+    s:SetPoint("LEFT", row.label, "RIGHT", 14, 0)
+    minusB:SetPoint("LEFT", s, "RIGHT", 8, 0)
+    box:SetPoint("LEFT", minusB, "RIGHT", 2, 0)
+    plusB:SetPoint("LEFT", box, "RIGHT", 2, 0)
+    row._colLabel, row._colCtrl = row.label, s
     Skin(s, COL.well)
     s:SetThumbTexture(WHITE)
     local th = s:GetThumbTexture()
@@ -418,9 +425,12 @@ builders.range = function(win)
     return row
 end
 
--- select: the field spans from the shared control column to the row's right
--- edge. It used to be a fixed 160px pinned to the far right, which stranded it
--- away from its label and cut off long media names ("BigWigs: Encounter War...").
+-- select: the field sits on the shared control column and is sized to its
+-- CONTENT: the longest option name (measured at render into row._wantW),
+-- clamped to the room left on the row. The pullout matches the field exactly.
+-- History: a fixed 160px cut off long media names, then a 52%-of-row span
+-- left the field far wider than its options and the pullout wider still
+-- (user call 2026-09-05: field = longest option name, pullout = field width).
 -- When the option supplies `arcPreview` the field also grows a speaker button
 -- and every pullout line gets one, so a sound can be auditioned before picking
 -- it, the same feel as the LibSharedMedia sound picker.
@@ -611,16 +621,10 @@ builders.select = function(win)
         end
         refreshList()
         list:SetHeight(vis * 20 + 2)
-        -- The pullout is an overlay, so it may be WIDER than the field: that is
-        -- how a long media name stays readable while the field itself stays
-        -- compact. Bounded by the row space the field gave up, so it never
-        -- reaches the page scrollbar.
-        local fieldW = math.floor((b:GetWidth() or 160) + 0.5)
-        local room = math.floor((row._pullMax or fieldW) + 0.5)
-        local want = math.max(fieldW, 300)
-        if want > room then want = room end
-        if want < fieldW then want = fieldW end
-        list:SetWidth(math.max(160, want))
+        -- The pullout matches the field EXACTLY: the field is already sized
+        -- to the longest option name at render, so a wider overlay would just
+        -- dangle past the box it drops out of.
+        list:SetWidth(math.floor((b:GetWidth() or 160) + 0.5))
         list:ClearAllPoints()
         list:SetPoint("TOPLEFT", b, "BOTTOMLEFT", 0, -1)
         list:Show()
@@ -636,8 +640,8 @@ end
 builders.color = function(win)
     local row = NewRow(win, true)
     row.sw = MakeSwatch(row)
-    row.sw:SetPoint("RIGHT", -12, 0)
-    row.label:SetPoint("RIGHT", row.sw, "LEFT", -8, 0)
+    row.sw:SetPoint("LEFT", row.label, "RIGHT", 14, 0)
+    row._colLabel, row._colCtrl = row.label, row.sw
     row.sw:SetScript("OnClick", function()
         CloseDropdown(win)
         if row.onPickColor then row.onPickColor() end
@@ -669,8 +673,8 @@ builders.input = function(win)
     local row = NewRow(win, true)
     local eb = CreateFrame("EditBox", nil, row, "BackdropTemplate")
     eb:SetSize(160, 18)
-    eb:SetPoint("RIGHT", -12, 0)
-    row.label:SetPoint("RIGHT", eb, "LEFT", -8, 0)
+    eb:SetPoint("LEFT", row.label, "RIGHT", 14, 0)
+    row._colLabel, row._colCtrl = row.label, eb
     Skin(eb, COL.well)
     eb:SetFont(STANDARD_TEXT_FONT, 11, "")
     eb:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3])
@@ -927,6 +931,7 @@ local function renderRows(win, entries, xL, xR, y0)
                     win:Rerender()
                 end
                 place(row, ROW_H)
+                if curCol == nil then colRows[#colRows + 1] = row end
 
             elseif otype == "select" then
                 local row = acquire(win, "select")
@@ -988,6 +993,18 @@ local function renderRows(win, entries, xL, xR, y0)
                     row.showItemSpeakers = false
                     row.onPreview = nil
                 end
+                -- content width: the longest option name decides the field.
+                -- Insets: 8 text + 18 chevron; a speaker field starts the
+                -- text at 25 instead of 8; a scrollable pullout (>12 rows,
+                -- the builder's VISROWS) reserves 9px for its indicator bar.
+                local widest = 0
+                for _n, it in ipairs(items) do
+                    local tw = MeasureText(it.label)
+                    if tw > widest then widest = tw end
+                end
+                local pad = prev and 43 or 26
+                if #items > 12 then pad = pad + 9 end
+                row._wantW = math.floor(widest + pad + 0.5)
                 place(row, ROW_H)
                 -- share the checkbox column (full-width rows only, same rule)
                 if curCol == nil then colRows[#colRows + 1] = row end
@@ -1006,6 +1023,7 @@ local function renderRows(win, entries, xL, xR, y0)
                     OpenColorPicker(row, opt, info, win)
                 end
                 place(row, ROW_H)
+                if curCol == nil then colRows[#colRows + 1] = row end
 
             elseif otype == "execute" then
                 local row = acquire(win, "execute")
@@ -1036,6 +1054,7 @@ local function renderRows(win, entries, xL, xR, y0)
                     win:Rerender()
                 end
                 place(row, ROW_H)
+                if curCol == nil then colRows[#colRows + 1] = row end
 
             end
         end
@@ -1093,24 +1112,29 @@ local function renderRows(win, entries, xL, xR, y0)
             if w > widest then widest = w end
         end
         local col = 12 + widest + 16
-        local cap = rowW - 34               -- never shove the box off the right edge
+        -- Controls now FLOW RIGHT from the column, so the column has to leave
+        -- room for the widest cluster (the range row: slider + - + box + =
+        -- about 190px). At 34 the old right-pinned layout only needed room for
+        -- the checkbox itself; keeping that here ran sliders off the edge on
+        -- rows with long labels. Long labels ellipsize instead, which is right.
+        local cap = rowW - 200
         if col > cap then col = math.max(12, cap) end
         for i = 1, #colRows do
             local r = colRows[i]
             r._colCtrl:ClearAllPoints()
             r._colCtrl:SetPoint("LEFT", r, "LEFT", col, 0)
-            -- A dropdown sits on the column like everything else, but it does
-            -- NOT stretch to the right margin: full width ran the field under
-            -- the page scrollbar and was far more room than a value needs.
-            -- Roughly half the remaining span, floored so short panels stay
-            -- usable. `_pullMax` is the space it COULD have taken, which is
-            -- what bounds the pullout below.
+            -- A dropdown sits on the column like everything else, sized to
+            -- its CONTENT: the longest option name (row._wantW, measured at
+            -- render), clamped to the room left on the row so a huge media
+            -- name cannot run the field under the page scrollbar. The
+            -- pullout copies the field width on open, so the two always line
+            -- up edge to edge.
             if r._colFill then
                 local avail = rowW - col - 12
-                local w = math.floor(avail * 0.52)
-                if w < 150 then w = math.min(150, avail) end
+                local w = r._wantW or 150
+                if w < 80 then w = 80 end
+                if w > avail then w = avail end
                 if w > 1 then r._colCtrl:SetWidth(w) end
-                r._pullMax = avail
             end
             -- Bound the label at the column so an over-long name ellipsizes instead
             -- of running underneath the box. Safe to do AFTER the control is anchored

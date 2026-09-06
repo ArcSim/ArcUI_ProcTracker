@@ -459,6 +459,23 @@ local function GetViolations()
     return dwViolations
 end
 
+-- ── Proc chance for the next spender ──────────────────────────────────────────
+-- The math lives in Core (PT.DeckChance) because Elemental Tempest needs the
+-- same formula over a different resource. Enhancement assumes a FIXED spend:
+-- a full 10-stack Maelstrom Weapon spender, set by the Spender Maelstrom Cost
+-- slider. That is deliberate - the number stays put instead of shifting with
+-- whatever you last cast.
+local function GetChanceValue()
+    local db = PT.GetIconDB and PT.GetIconDB("dw")
+    return PT.DeckChance(DECK_SIZE, DECK_PROCS,
+        dwTotalStacks % DECK_SIZE, dwDeckProcs, (db and db.chanceSpend) or 10)
+end
+
+local function GetChanceText()
+    local db = PT.GetIconDB and PT.GetIconDB("dw")
+    return PT.FormatChance(GetChanceValue(), db and db.chanceDecimals)
+end
+
 -- ── Reset ─────────────────────────────────────────────────────────────────────
 local function Reset()
     dwTotalStacks     = 0
@@ -570,6 +587,27 @@ local function TryRegisterDeck()
         name        = "Doom Winds",
         -- this deck's proc site calls PT.Sounds.PlayFor, so it gets the Sounds tab
         hasProcSound = true,
+        -- Enhancement forecasts a FIXED spend (a full 10-stack spender), so it
+        -- gets the manual slider. Decks whose spend size varies (Elemental,
+        -- whose spenders cost 60 or 90) follow their last real spend instead
+        -- and must not offer a 1-10 slider that means nothing to them.
+        chanceSpendSlider = true,
+        -- CDM icons a text can ride, offered as named presets so nobody has to
+        -- hunt for a cooldownID. Any other icon is reachable via Custom ID.
+        -- Action bar buttons a text can ride. Ascendance is listed under BOTH
+        -- its ids: the bar reports whichever the current override resolves to,
+        -- so matching only one would miss depending on talents and form.
+        actionAnchors = {
+            -- Ascendance only. Doom Winds is unleashed BY Ascendance rather than
+            -- cast from a bar, and it reports the same base spell (384352), so a
+            -- second preset would just resolve to the same button.
+            { name = "Ascendance", ids = { 114051, 384352 } },
+        },
+        cdmAnchors = {
+            { id = 12821, name = "Ascendance (cooldown icon)" },
+            { id = 13163, name = "Ascendance (buff icon)" },
+            { id = 82621, name = "Doom Winds (buff icon)" },
+        },
         deckSize    = DECK_SIZE,
         procs       = DECK_PROCS,
         defaultIcon = DW_DEFAULT_ICON,
@@ -578,6 +616,10 @@ local function TryRegisterDeck()
         noCDMWarn   = (HasWolfTalent() and not ForceCDMSetting()) or nil,
         GetDeckPos    = GetDeckPos,
         GetProcs      = GetProcs,
+        -- opt-in: Core offers the "Proc chance" text mode only for decks that
+        -- can actually compute one
+        GetChanceText  = GetChanceText,
+        GetChanceValue = GetChanceValue,
         GetViolations = GetViolations,
         OnReset     = Reset,
         OnEnable    = function()

@@ -96,6 +96,22 @@ end
 
 local function GetDeckPos()   return dreTotalStacks % DECK_SIZE end
 local function GetProcs()     return dreDeckProcs end
+
+-- ── Proc chance for the next spender ──────────────────────────────────────────
+-- Same shape as Doom Winds: this deck advances by Maelstrom Weapon stacks
+-- spent, so a spender draws its stack count as cards. The math is shared
+-- (PT.DeckChance in Core) and the assumed spend comes from the Spender
+-- Maelstrom Cost slider, defaulting to a full 10-stack spender.
+local function GetChanceValue()
+    local db = PT.GetIconDB and PT.GetIconDB("dre")
+    return PT.DeckChance(DECK_SIZE, DECK_PROCS,
+        dreTotalStacks % DECK_SIZE, dreDeckProcs, (db and db.chanceSpend) or 10)
+end
+
+local function GetChanceText()
+    local db = PT.GetIconDB and PT.GetIconDB("dre")
+    return PT.FormatChance(GetChanceValue(), db and db.chanceDecimals)
+end
 local function GetViolations() return dreViolations end
 
 local function Reset()
@@ -207,6 +223,12 @@ local function TryRegisterDeck()
         noCDMWarn     = true,   -- no CDM frame for DRE, suppress yellow overlay
         GetDeckPos    = GetDeckPos,
         GetProcs      = GetProcs,
+        -- opt-in: Core only offers the Proc Chance Text section to decks that
+        -- can compute one, and only offers the fixed-spend slider to decks
+        -- whose spend size does not vary
+        GetChanceText  = GetChanceText,
+        GetChanceValue = GetChanceValue,
+        chanceSpendSlider = true,
         GetViolations = GetViolations,
         OnReset       = Reset,
         OnEnable      = function()
