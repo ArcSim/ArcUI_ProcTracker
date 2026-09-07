@@ -1606,7 +1606,7 @@ local function BuildDeckOptionsGroup(entry)
                 hidden = function() return iconHidden() or L("deckTextNote", "") == "" end,
             },
             showDeckText = {
-                type  = "toggle", name = "Show Deck Position",
+                type  = "toggle", name = L("deckShow", "Show Deck Position"),
                 desc  = "Draw the card position on the icon.",
                 order = o(), width = "full",
                 hidden = H("showDeckText"),
@@ -1708,7 +1708,7 @@ local function BuildDeckOptionsGroup(entry)
                 hidden = function() return iconHidden() or L("procTextNote", "") == "" end,
             },
             showProcText = {
-                type  = "toggle", name = "Show Proc Count",
+                type  = "toggle", name = L("procShow", "Show Proc Count"),
                 desc  = "Draw the proc counter on the icon.",
                 order = o(), width = "full",
                 hidden = H("showProcText"),
@@ -1839,6 +1839,36 @@ local function BuildDeckOptionsGroup(entry)
                     local w = entry.widget
                     if w and w._chanceText then w._chanceText:SetShown(v) end
                     UpdateIcon(entry)
+                end,
+            },
+            testShape = {
+                type = "select", name = "Proc Model",
+                desc = "Which candidate model this research icon follows."
+                    .. "|n|n|cff8298b4Fitted against three shamans over three keys, an escalating chance beats every deck shape and beats flat RNG by about 1e10 to 1. A deck cannot produce a 30 draw drought and a mean gap near 13 at the same time; escalating chance can. Deck shapes are listed as rivals. Watch the position and chance against what actually happens.|r",
+                order = o(), width = 1.5,
+                hidden = function() return iconHidden() or not entry.testShapePicker end,
+                values = function()
+                    local t = {}
+                    for i, s in ipairs(entry.SHAPES or {}) do
+                        -- BLP models carry their own label; they have no P or N
+                        -- to format, so a deck-only format string would error.
+                        t[i] = s.label
+                            or string.format("%d in %d  (%.2f%%)", s.p, s.n, s.p / s.n * 100)
+                    end
+                    return t
+                end,
+                sorting = function()
+                    local s = {}
+                    for i = 1, #(entry.SHAPES or {}) do s[i] = i end
+                    return s
+                end,
+                get = function() return db().testShape or entry.testShapeDefault or 1 end,
+                set = function(_, v)
+                    db().testShape = v
+                    -- by id: the research trackers run side by side, so
+                    -- changing one must not reset the other's live run
+                    if PT.RestoDRETest then PT.RestoDRETest.ApplyShape(entry.id) end
+                    refresh()
                 end,
             },
             chanceSpend = {
@@ -3370,6 +3400,15 @@ InitMinimapButton = function()
     else
         LDBIcon:Show("ArcUI_ProcTracker")
     end
+    -- LibDBIcon's retail branch centers the icon on the BUTTON, but the
+    -- TrackingBorder ring's hole sits at ~(16.0, -14.2) of the 31px button
+    -- (the ring art is offset inside its texture), so the icon rides ~0.5px
+    -- left and ~1.3px low of the hole. Re-seat it on the hole's center.
+    local btn = LDBIcon.GetMinimapButton and LDBIcon:GetMinimapButton("ArcUI_ProcTracker")
+    if btn and btn.icon then
+        btn.icon:ClearAllPoints()
+        btn.icon:SetPoint("CENTER", btn, "CENTER", 0.5, 1.3)
+    end
 end
 
 SLASH_ARCPROCTRACKER1 = "/pt"
@@ -3517,6 +3556,29 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
             C_Timer.After(0.1, function() ArcUI_PT_DWDebug.Export() end)
         else
             ArcUI_PT_DWDebug.Toggle()
+        end
+        return
+    end
+
+    -- /pt restodre → Restoration DRE research probe (deck or flat 7%?)
+    if arg == "restodre" or arg:sub(1, 9) == "restodre " then
+        if not ArcUI_PT_RestoDREDebug then
+            print("|cffFF4444ProcTracker:|r RestoDREDebug not loaded")
+            return
+        end
+        local sub = arg:sub(10)
+        if sub == "export" then
+            ArcUI_PT_RestoDREDebug.Export()
+        elseif sub == "reset" then
+            ArcUI_PT_RestoDREDebug.Reset()
+        elseif sub == "proc" then
+            -- mark a proc by hand while the real signal is still unknown
+            if ArcUI_PT_RestoDRE_MarkProc then ArcUI_PT_RestoDRE_MarkProc() end
+        elseif sub == "testdeck" then
+            -- research deck for a candidate shape; off until asked for
+            if PT.RestoDRETest then PT.RestoDRETest.Enable() end
+        else
+            ArcUI_PT_RestoDREDebug.Toggle()
         end
         return
     end

@@ -1,5 +1,11 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.4.0
+### New Features
+- **Deeply Rooted Elements tracker (Restoration)** — A new icon showing the chance your next Riptide procs Ascendance, and how many Riptides you have cast since your last proc. The chance climbs 1% per Riptide and resets when it procs. Off by default, and only shows if you have the talent.
+### Improvements
+- **12.1.5 test client** — Loads on the 12.1.5 PTR without the out of date warning.
+
 ## 1.3.1
 - **Natural Harmony**: Nature's Guardian now uses the shorter cooldown when you have the talent. 35 seconds for Elemental, 30 for Restoration.
 
