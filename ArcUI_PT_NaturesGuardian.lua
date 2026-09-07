@@ -26,6 +26,14 @@ local NG_ICON     = 136060
 local NG_NODE_ID  = 103613
 local NG_ENTRY_ID = 127890
 
+-- Natural Harmony (Farseer hero talent) shortens the internal cooldown. The
+-- magnitude is NOT the same everywhere: Elemental gets 10 sec off and
+-- Restoration 15, for the same spell and the same node. See NH_BY_SPEC below.
+local NH_SPELL     = 443442
+local NH_NODE_ID   = 94858
+local NH_ENTRY_ID  = 117455
+local NH_FALLBACK  = 10          -- 45 - 10 = 35s, if the spec is unknown
+
 local ngEnabled = false
 local ngOnCD    = false
 
@@ -68,9 +76,48 @@ NG.HasTalent = HasNGTalent
 -- timer from GetTime(). Both numbers are ours, never secrets, so the arithmetic
 -- and the SetCooldown push are safe everywhere -- exactly the "scheduling needs
 -- real numbers, so use GetTime plus locally tracked values" path.
-local NG_ICD = 45
+local NG_ICD_BASE = 45
 
-local ngExpiry = 0
+local ngExpiry   = 0
+local ngDuration = NG_ICD_BASE   -- length of the CURRENTLY RUNNING cooldown
+
+-- Is Natural Harmony actually picked?
+local function HasNaturalHarmony()
+    local cfgID = C_ClassTalents and C_ClassTalents.GetActiveConfigID
+                  and C_ClassTalents.GetActiveConfigID()
+    if not cfgID then return false end
+    local node = C_Traits and C_Traits.GetNodeInfo
+                 and C_Traits.GetNodeInfo(cfgID, NH_NODE_ID)
+    if not node then return false end
+    if node.activeEntry and node.activeEntry.entryID == NH_ENTRY_ID then
+        return (node.activeEntry.rank or 0) > 0
+    end
+    return false
+end
+
+-- How much Natural Harmony takes off, per spec. Confirmed in game: Elemental
+-- reads "by 10 sec" and Restoration "by 15 sec" for the same talent and the
+-- same node. A table beats parsing the tooltip text: it is exact, and it cannot
+-- break in a non-English client. Enhancement is absent on purpose -- Farseer is
+-- an Elemental/Restoration hero tree, so Enhancement never has this talent and
+-- HasNaturalHarmony already returns false there.
+local NH_BY_SPEC = {
+    [262] = 10,   -- Elemental   -> 35s
+    [264] = 15,   -- Restoration -> 30s
+}
+
+local function HarmonyReduction()
+    local idx = GetSpecialization and GetSpecialization()
+    local specID = idx and GetSpecializationInfo and GetSpecializationInfo(idx)
+    return (specID and NH_BY_SPEC[specID]) or NH_FALLBACK
+end
+
+-- The cooldown length RIGHT NOW, for a proc starting this instant.
+local function CurrentICD()
+    if not HasNaturalHarmony() then return NG_ICD_BASE end
+    return NG_ICD_BASE - HarmonyReduction()
+end
+NG.CurrentICD = CurrentICD
 
 -- A bulk SPELL_UPDATE_COOLDOWN broadcast carries no spellID at all. Matching a
 -- nil would start the timer on every unrelated cooldown tick, so ignore those
@@ -93,7 +140,9 @@ local function Push()
     if not w or not w._ngCooldown then return end
     local remain = ngExpiry - GetTime()
     if remain > 0 then
-        w._ngCooldown:SetCooldown(ngExpiry - NG_ICD, NG_ICD)
+        -- draw with the duration this cooldown STARTED with, not the current
+        -- one: a talent swap mid-cooldown must not rescale a running sweep
+        w._ngCooldown:SetCooldown(ngExpiry - ngDuration, ngDuration)
     else
         w._ngCooldown:Clear()
     end
@@ -112,11 +161,13 @@ end
 NG.Refresh = Refresh
 
 local function StartICD()
-    ngExpiry = GetTime() + NG_ICD
-    NGDbg("PROC", "internal cooldown started, " .. NG_ICD .. "s")
+    ngDuration = CurrentICD()
+    ngExpiry   = GetTime() + ngDuration
+    NGDbg("PROC", "internal cooldown started, " .. ngDuration .. "s"
+        .. (HasNaturalHarmony() and " (Natural Harmony)" or ""))
     Refresh()
     -- one timer to flip back to ready; no polling in between
-    C_Timer.After(NG_ICD + 0.1, function()
+    C_Timer.After(ngDuration + 0.1, function()
         if (ngExpiry - GetTime()) <= 0 then Refresh() end
     end)
 end
@@ -170,8 +221,9 @@ end)
 
 -- ── Registration ─────────────────────────────────────────────────────────────
 local function Reset()
-    ngOnCD   = false
-    ngExpiry = 0
+    ngOnCD     = false
+    ngExpiry   = 0
+    ngDuration = CurrentICD()
     Refresh()
 end
 

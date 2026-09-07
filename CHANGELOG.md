@@ -1,5 +1,8 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.3.1
+- **Natural Harmony**: Nature's Guardian now uses the shorter cooldown when you have the talent. 35 seconds for Elemental, 30 for Restoration.
+
 ## 1.3.0
 - **Nature's Guardian tracker (new)**: An icon for its 45 second cooldown. Shows only when you have the talent.
 - **Proc chance text (new)**: Every deck can show the odds your next spender procs.
