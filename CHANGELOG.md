@@ -1,5 +1,9 @@
 # ArcUI ProcTracker — Changelog
 
+## 1.4.1
+### Bug Fixes
+- **Hide out of combat now works from login** — The Nature's Guardian icon ignored the setting when you first logged in and stayed on screen until you entered combat or opened the options window. Present since 1.3.0.
+
 ## 1.4.0
 ### New Features
 - **Deeply Rooted Elements tracker (Restoration)** — A new icon showing the chance your next Riptide procs Ascendance, and how many Riptides you have cast since your last proc. The chance climbs 1% per Riptide and resets when it procs. Off by default, and only shows if you have the talent.

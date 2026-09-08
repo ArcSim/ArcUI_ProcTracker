@@ -202,7 +202,14 @@ local function ApplyTalentVisibility()
     if not w then return end
     local db = PT.GetIconDB and PT.GetIconDB("ng")
     local want = HasNGTalent() and (not db or db.deckEnabled ~= false)
-    if want then w:Show() else w:Hide() end
+    -- MUST go through ShowDeckIconIfEnabled, never a raw w:Show(). This runs on
+    -- PLAYER_ENTERING_WORLD, the same event the combat watcher uses to hide
+    -- "Hide out of combat" widgets at login, and frame event order is not
+    -- guaranteed. A raw Show() landing second beat the hide, so the icon showed
+    -- every login until combat ended or the options panel was closed (its
+    -- OnHide re-runs the visibility pass). The helper honours deckEnabled AND
+    -- the combat gate, so it is correct whichever order the events arrive in.
+    if want then PT.ShowDeckIconIfEnabled("ng") else w:Hide() end
     NGDbg("TALENT", want and "talented" or "not talented")
 end
 NG.ApplyTalentVisibility = ApplyTalentVisibility
