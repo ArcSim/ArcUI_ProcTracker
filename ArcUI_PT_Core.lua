@@ -1303,6 +1303,8 @@ local function BuildDeckOptionsGroup(entry)
                     db().deckEnabled = v
                     local w = entry.widget
                     if w then if v then w:Show() else w:Hide() end end
+                    -- turning the last consumer off should stop the tracking too
+                    PT.RefreshDeckDemand(entry.id)
                 end,
             },
 
@@ -2602,6 +2604,8 @@ local function BuildMasterOptionsTable()
                     get   = function() return sdb().procSoundEnabled and true or false end,
                     set   = function(_, v)
                         sdb().procSoundEnabled = v and true or false
+                        -- sound alone is reason enough to keep tracking
+                        PT.RefreshDeckDemand(entry.id)
                         -- hear it the moment you switch it on
                         if v then playCurrent() end
                     end,
@@ -2783,6 +2787,17 @@ local function BuildMasterOptionsTable()
         args[entry.id] = deckTab
         order = order + 1
     end
+    -- Trackers that are not decks bring their own tab (Power Infusion).
+    if PT.PowerInfusion and PT.PowerInfusion.BuildOptionsTab then
+        args.powerinfusion = PT.PowerInfusion.BuildOptionsTab(order)
+        order = order + 1
+    end
+    -- The move to Arc Auras leads the tab row (ArcUI_PT_Moving.lua). With Arc
+    -- Auras loaded the trackers live there, so its tab is the only one.
+    if PT.Moving and PT.Moving.BuildOptionsTab then
+        args.arcauras = PT.Moving.BuildOptionsTab(0)
+        if PT.Moving.ArcAurasLoaded() then args = { arcauras = args.arcauras } end
+    end
     return {
         type        = "group",
         name        = "Proc Deck Tracker",
@@ -2859,6 +2874,8 @@ local function ArmOptionsPreview()
 end
 
 BuildOptionsPanel = function(entry)
+    -- with Arc Auras loaded only the Arc Auras tab exists: every way in opens it
+    if PT.Moving and PT.Moving.ArcAurasLoaded() then entry = { id = "arcauras" } end
     -- the Arc look is the DEFAULT (Arc's call); Classic is the opt-out
     local db = ArcUI_ProcTrackerDB
     if not (db and db.classicOptions) and OpenSkinnedOptions(entry) then
@@ -2954,6 +2971,34 @@ end
 -- Get a registered deck entry by id
 function PT.GetDeck(id)
     return registryMap[id]
+end
+
+-- ── Demand ────────────────────────────────────────────────────────────────────
+-- Is anything actually CONSUMING this deck's output? Three things can: the icon,
+-- the bar, or the proc sound. A deck whose output nobody reads should not be
+-- tracking -- that is what keeps MSW's UNIT_AURA handler unregistered for a
+-- Restoration shaman who only wants Nature's Guardian.
+--
+-- Sound counts. Someone can legitimately run a deck with the icon off purely for
+-- the proc sound, and dropping tracking there would silently kill their audio.
+function PT.DeckWanted(id)
+    local idb = ArcUI_ProcTrackerDB and ArcUI_ProcTrackerDB.icons
+                and ArcUI_ProcTrackerDB.icons[id]
+    -- Unknown or untouched settings mean defaults, and the icon defaults ON.
+    if not idb then return true end
+    if idb.deckEnabled ~= false then return true end
+    if idb.procSoundEnabled then return true end
+    local bdb = ArcUI_ProcTrackerDB and ArcUI_ProcTrackerDB.bars
+                and ArcUI_ProcTrackerDB.bars[id]
+    if bdb and bdb.barEnabled then return true end
+    return false
+end
+
+-- Re-evaluate a deck after one of those three toggles changed. Decks opt in by
+-- supplying OnDemandChanged; ones that do not care are untouched.
+function PT.RefreshDeckDemand(id)
+    local entry = registryMap[id]
+    if entry and entry.OnDemandChanged then entry.OnDemandChanged() end
 end
 
 -- Iterate all registered decks
@@ -3350,7 +3395,10 @@ end)
 LDB     = LibStub and LibStub("LibDataBroker-1.1", true)
 LDBIcon = LibStub and LibStub("LibDBIcon-1.0", true)
 
-local ptLDB = LDB and LDB:NewDataObject("ArcUI_ProcTracker", {
+-- With Arc Auras loaded (it loads first) the trackers live there: no launcher at
+-- all, so no minimap button and nothing a button bag or broker bar could show.
+local ptLDB = LDB and not (C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("ArcAuras"))
+    and LDB:NewDataObject("ArcUI_ProcTracker", {
     type = "launcher",
     text = "Proc Tracker",
     icon = "Interface\\AddOns\\ArcUI_ProcTracker\\Textures\\PT_Icon_400x400",
@@ -3373,6 +3421,7 @@ local ptLDB = LDB and LDB:NewDataObject("ArcUI_ProcTracker", {
     OnTooltipShow = function(tooltip)
         if not tooltip or not tooltip.AddLine then return end
         tooltip:SetText("|cffFFAA00Proc Tracker|r")
+        tooltip:AddLine("Now part of Arc Auras", 0.25, 0.79, 0.95)
         tooltip:AddLine("Left-click: open options", 0.7, 0.7, 0.7)
         tooltip:AddLine("Right-click: cycle decks", 0.7, 0.7, 0.7)
         tooltip:AddLine("|cff888888/pt for commands|r", 0.5, 0.5, 0.5)
@@ -3388,6 +3437,10 @@ local ptLDB = LDB and LDB:NewDataObject("ArcUI_ProcTracker", {
 })
 
 InitMinimapButton = function()
+    -- With Arc Auras loaded the trackers live there: no button is made (a button
+    -- bag would show a merely hidden one). The saved choice is left alone, so it
+    -- comes back without Arc Auras.
+    if PT.Moving and PT.Moving.ArcAurasLoaded() then return end
     if not LDB or not LDBIcon or not ptLDB then
         print("|cffFF4444ProcTracker:|r LibDBIcon not found — minimap button unavailable")
         return
@@ -3442,6 +3495,19 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
         else
             print("|cffFF4444ProcTracker:|r unknown deck '" .. resetID .. "'")
         end
+        return
+    end
+
+    -- /pt pi → the Power Infusion tab. /pt pitest <spell ID | off> points it at
+    -- one of your own buffs for this session, to test without a priest. Only
+    -- while its file loads (the toc leaves it out of the last release).
+    if arg == "pi" and PT.PowerInfusion then
+        BuildOptionsPanel({ id = "powerinfusion" })
+        return
+    end
+    local piTest = arg:match("^pitest%s*(.*)$")
+    if piTest and PT.PowerInfusion then
+        PT.PowerInfusion.SetTestSpell(piTest)
         return
     end
 
@@ -3595,10 +3661,11 @@ SlashCmdList["ARCPROCTRACKER"] = function(arg)
 
     -- /pt minimap
     if arg == "minimap" then
+        -- no button to toggle (Arc Auras loaded, or no library): leave the saved choice as it is
+        if not LDBIcon or not ptLDB then return end
         local db = GetDB()
         db.minimap = db.minimap or {}
         db.minimap.hide = not db.minimap.hide
-        if not LDBIcon or not ptLDB then return end
         if db.minimap.hide then
             LDBIcon:Hide("ArcUI_ProcTracker")
             print("|cffFFAA00ProcTracker|r minimap button hidden  |cff888888/pt minimap to show|r")

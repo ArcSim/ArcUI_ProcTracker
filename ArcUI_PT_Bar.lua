@@ -817,6 +817,8 @@ local function BuildBarOptionsGroup(entry)
             set=function(_,v)
                 db().barEnabled=v
                 PT.ApplyBarVisibility(entry)
+                -- the bar is one of the three consumers that keep a deck tracking
+                if PT.RefreshDeckDemand then PT.RefreshDeckDemand(entry.id) end
             end,
         },
         barHideOOC = {

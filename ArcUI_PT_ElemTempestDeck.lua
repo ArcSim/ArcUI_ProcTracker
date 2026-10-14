@@ -157,6 +157,50 @@ local function GetMaelstromCost(spellID)
     return 0
 end
 
+-- ── Proc window listener ──────────────────────────────────────────────────────
+-- ONE listener frame serves every spend's 5ms window. This used to create a new
+-- frame on every Maelstrom spend, and WoW never frees a frame, so every spender
+-- cast leaked one for the rest of the session. Each spend still gets its own
+-- watch record (a plain table the garbage collector can reclaim), so two
+-- spends in the same client frame resolve exactly as they did with one frame
+-- each. The event is registered only while a window is open.
+local openWatches = {}          -- open spend windows, oldest first
+local watchFrame  = CreateFrame("Frame")
+
+watchFrame:SetScript("OnEvent", function(_, _, sid)
+    if issecretvalue and issecretvalue(sid) then return end
+    if tonumber(sid) ~= TEMPEST_BUFF then return end
+    for i = 1, #openWatches do
+        local w = openWatches[i]
+        local age = (GetTime() - w.spendTime) * 1000
+        local instIDNow = cdm.instID
+        if w.firedAt then
+            EDbg("SPELL_UPDATE_CD 454015 IGNORED (already seen)",
+                string.format("age=%.1fms instID=%s", age, tostring(instIDNow)))
+        elseif age > 5 then
+            EDbg("SPELL_UPDATE_CD 454015 IGNORED (too late)",
+                string.format("age=%.1fms > 5ms instID=%s", age, tostring(instIDNow)))
+        else
+            w.firedAt = GetTime()
+            EDbg("SPELL_UPDATE_CD 454015 COUNTED",
+                string.format("age=%.1fms instID=%s atSpend=%s",
+                    age, tostring(instIDNow), tostring(w.instIDAtSpend)))
+        end
+    end
+end)
+
+local function OpenWatch(w)
+    openWatches[#openWatches + 1] = w
+    if #openWatches == 1 then watchFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN") end
+end
+
+local function CloseWatch(w)
+    for i = #openWatches, 1, -1 do
+        if openWatches[i] == w then table.remove(openWatches, i); break end
+    end
+    if #openWatches == 0 then watchFrame:UnregisterEvent("SPELL_UPDATE_COOLDOWN") end
+end
+
 local function OnMaelstromSpent(spellID, cost, isASC)
     if not elemEnabled then return end
     snap.deckNumber   = elemDeckNumber
@@ -183,35 +227,13 @@ local function OnMaelstromSpent(spellID, cost, isASC)
 
     if isASC then return end
 
-    local spellCDFiredAt = nil
-    local spellCDFrame   = CreateFrame("Frame")
-    spellCDFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-    local spendTime = GetTime()
-
-    spellCDFrame:SetScript("OnEvent", function(self, _, sid)
-        if issecretvalue and issecretvalue(sid) then return end
-        if tonumber(sid) == TEMPEST_BUFF then
-            local age = (GetTime() - spendTime) * 1000
-            local instIDNow = cdm.instID
-            if spellCDFiredAt then
-                EDbg("SPELL_UPDATE_CD 454015 IGNORED (already seen)",
-                    string.format("age=%.1fms instID=%s", age, tostring(instIDNow)))
-            elseif age > 5 then
-                EDbg("SPELL_UPDATE_CD 454015 IGNORED (too late)",
-                    string.format("age=%.1fms > 5ms instID=%s", age, tostring(instIDNow)))
-            else
-                spellCDFiredAt = GetTime()
-                EDbg("SPELL_UPDATE_CD 454015 COUNTED",
-                    string.format("age=%.1fms instID=%s atSpend=%s",
-                        age, tostring(instIDNow), tostring(instIDAtSpend)))
-            end
-        end
-    end)
+    local w = { spendTime = GetTime(), instIDAtSpend = instIDAtSpend }  -- firedAt: set by watchFrame
+    OpenWatch(w)
 
     C_Timer.After(0.005, function()
-        spellCDFrame:UnregisterAllEvents()
-        spellCDFrame:SetScript("OnEvent", nil)
+        CloseWatch(w)
         if not elemEnabled then return end
+        local spellCDFiredAt = w.firedAt
         local instIDNow = cdm.instID
         EDbg("RULE1 check", "atSpend="..tostring(instIDAtSpend)
             .." now="..tostring(instIDNow)

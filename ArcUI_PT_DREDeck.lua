@@ -133,6 +133,45 @@ local function OnMSWGained(instID, apps)
     lastMSWGainTime = GetTime()
 end
 
+-- ── Proc window listener ──────────────────────────────────────────────────────
+-- ONE listener frame serves every consume's 5ms window. This used to create a
+-- new frame on every MSW consume, and WoW never frees a frame, so every spender
+-- cast leaked one for the rest of the session. Each consume still gets its own
+-- watch record (a plain table the garbage collector can reclaim), so two
+-- consumes in the same client frame resolve exactly as they did with one frame
+-- each. The event is registered only while a window is open.
+local openWatches = {}          -- open consume windows, oldest first
+local watchFrame  = CreateFrame("Frame")
+
+watchFrame:SetScript("OnEvent", function(_, _, sid)
+    if issecretvalue and issecretvalue(sid) then return end
+    local id = tonumber(sid)
+    if not id then return end
+    for i = 1, #openWatches do
+        local w = openWatches[i]
+        local age = (GetTime() - w.consumeTime) * 1000
+        -- Log ALL spell updates in window so we can identify the right spellID
+        DREDbg("SPELL_UPDATE_CD " .. id, string.format("age=%.1fms", age))
+        -- 114051 confirmed; 378270 (DRE CDPulse) does not fire
+        if age <= 5 and id == ASC_SPELL_ID and not w.fired then
+            w.fired   = true
+            w.spellID = id
+        end
+    end
+end)
+
+local function OpenWatch(w)
+    openWatches[#openWatches + 1] = w
+    if #openWatches == 1 then watchFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN") end
+end
+
+local function CloseWatch(w)
+    for i = #openWatches, 1, -1 do
+        if openWatches[i] == w then table.remove(openWatches, i); break end
+    end
+    if #openWatches == 0 then watchFrame:UnregisterEvent("SPELL_UPDATE_COOLDOWN") end
+end
+
 -- ── MSW consume window ────────────────────────────────────────────────────────
 local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
     if not dreEnabled then return end
@@ -148,34 +187,14 @@ local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
 
     -- Open window: listen for SPELL_UPDATE_COOLDOWN for DRE (378270) or Asc (114051)
     -- Also track if MSW GAINED fires same frame (consume-generated vs proc from elsewhere)
-    local spellCDFired     = false
-    local spellCDSpellID   = nil
-    local consumeFrame     = GetTime()
-
-    local spellCDWatchFrame = CreateFrame("Frame")
-    spellCDWatchFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-    local consumeTime = GetTime()
-
-    spellCDWatchFrame:SetScript("OnEvent", function(self, _, sid)
-        if issecretvalue and issecretvalue(sid) then return end
-        local id = tonumber(sid)
-        if not id then return end
-        local age = (GetTime() - consumeTime) * 1000
-        -- Log ALL spell updates in window so we can identify the right spellID
-        DREDbg("SPELL_UPDATE_CD " .. id, string.format("age=%.1fms", age))
-        if age > 5 then return end
-        if id == ASC_SPELL_ID then  -- 114051 confirmed; 378270 (DRE CDPulse) does not fire
-            if not spellCDFired then
-                spellCDFired   = true
-                spellCDSpellID = id
-            end
-        end
-    end)
+    local consumeFrame = GetTime()
+    local w = { consumeTime = GetTime(), fired = false }  -- spellID: set by watchFrame
+    OpenWatch(w)
 
     C_Timer.After(0.005, function()
-        spellCDWatchFrame:UnregisterAllEvents()
-        spellCDWatchFrame:SetScript("OnEvent", nil)
+        CloseWatch(w)
         if not dreEnabled then return end
+        local spellCDFired, spellCDSpellID = w.fired, w.spellID
 
         -- Check MSW GAINED same frame as SPELL_UPDATE (consume-generated proc signal)
         local mswGainedSameFrame = (lastMSWGainTime == consumeFrame)
@@ -211,6 +230,12 @@ PT.DRE.OnProc         = nil
 PT.DRE.OnDeckRollover = nil
 PT.DRE.OnDebug        = nil
 
+-- Forward declaration. RegisterDeck below hands Core an OnDemandChanged
+-- closure over this, and the definition lives further down the file -- a
+-- plain `local function` there would leave the closure pointing at a nil
+-- global, so the callback would silently never fire.
+local ApplyTalentVisibility
+
 -- ── Register with Core ────────────────────────────────────────────────────────
 local function TryRegisterDeck()
     if not IsDRETalented() then return end
@@ -231,6 +256,8 @@ local function TryRegisterDeck()
         chanceSpendSlider = true,
         GetViolations = GetViolations,
         OnReset       = Reset,
+        -- Core calls this when the icon / bar / sound toggles change.
+        OnDemandChanged = function() ApplyTalentVisibility() end,
         OnEnable      = function()
             dreEnabled = true
             PT.MSW.Subscribe("OnConsumed", OnMSWConsumed)
@@ -240,7 +267,7 @@ local function TryRegisterDeck()
     })
 end
 
-local function ApplyTalentVisibility()
+function ApplyTalentVisibility()
     local entry = PT and PT.GetDeck and PT.GetDeck("dre")
     if not entry then return end
     local configID = C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID()
@@ -250,7 +277,12 @@ local function ApplyTalentVisibility()
         if talented then PT.ShowDeckIconIfEnabled("dre") else entry.widget:Hide() end
     end
     if PT.ApplyBarTalentVisibility then PT.ApplyBarTalentVisibility("dre", talented) end
-    if not talented then
+    -- TRACK only while something CONSUMES this deck: icon, bar, or proc sound.
+    -- Talent alone is not enough -- a talented deck whose output nobody reads
+    -- was still driving MSW's UNIT_AURA handler for nothing. Visibility above
+    -- still follows the talent; this gates the SUBSCRIPTION only.
+    local track = talented and PT.DeckWanted("dre")
+    if not track then
         dreEnabled = false
         PT.MSW.Unsubscribe("OnConsumed", OnMSWConsumed)
         PT.MSW.Unsubscribe("OnGained",   OnMSWGained)

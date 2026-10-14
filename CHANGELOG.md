@@ -1,5 +1,12 @@
 # ArcUI ProcTracker — Changelog
 
+## 2.0.0
+
+ArcUI ProcTracker has moved into Arc Auras. This is the last ProcTracker update.
+
+### New Features
+- **Moving to Arc Auras** - Install Arc Auras and it brings your trackers over, in the same places with the same looks. A notice at login and a new Arc Auras tab show where to get it.
+
 ## 1.4.1
 ### Bug Fixes
 - **Hide out of combat now works from login** — The Nature's Guardian icon ignored the setting when you first logged in and stayed on screen until you entered combat or opened the options window. Present since 1.3.0.

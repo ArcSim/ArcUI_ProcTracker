@@ -579,6 +579,12 @@ local function IsDWTalented()
     return activeEntryID == ASC_ENTRY_ID
 end
 
+-- Forward declaration. RegisterDeck below hands Core an OnDemandChanged
+-- closure over this, and the definition lives further down the file -- a
+-- plain `local function` there would leave the closure pointing at a nil
+-- global, so the callback would silently never fire.
+local ApplyTalentVisibility
+
 -- ── Register with ProcTracker Core ────────────────────────────────────────────
 local function TryRegisterDeck()
     if not IsDWTalented() then return end
@@ -622,6 +628,8 @@ local function TryRegisterDeck()
         GetChanceValue = GetChanceValue,
         GetViolations = GetViolations,
         OnReset     = Reset,
+        -- Core calls this when the icon / bar / sound toggles change.
+        OnDemandChanged = function() ApplyTalentVisibility() end,
         OnEnable    = function()
             dwEnabled = true
             wolfMode  = HasWolfTalent() and not ForceCDMSetting()
@@ -639,7 +647,7 @@ local function TryRegisterDeck()
 end
 
 -- Show/hide widget based on current talent state
-local function ApplyTalentVisibility()
+function ApplyTalentVisibility()
     local entry = PT and PT.GetDeck and PT.GetDeck("dw")
     if not entry then return end
     -- If talent API not ready (zone transition), don't change state
@@ -672,8 +680,12 @@ local function ApplyTalentVisibility()
         InstallSetCooldownIDHook()
         RehookDWCDMFrame()
     end
-    -- Pause MSW tracking when untalented
-    if not talented then
+    -- TRACK only while something CONSUMES this deck: icon, bar, or proc sound.
+    -- Talent alone is not enough -- a talented deck whose output nobody reads
+    -- was still driving MSW's UNIT_AURA handler for nothing. Visibility above
+    -- still follows the talent; this gates the SUBSCRIPTION only.
+    local track = talented and PT.DeckWanted("dw")
+    if not track then
         dwEnabled = false
         PT.MSW.Unsubscribe("OnConsumed", OnMSWConsumed)
         -- NOTE: no Reset() here — deck state survives zone/reload

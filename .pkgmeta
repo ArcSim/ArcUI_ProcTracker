@@ -11,6 +11,11 @@ manual-changelog:
   filename: CHANGELOG.md
   markup-type: markdown
 
+# ArcUI ProcTracker now lives in Arc Auras: the CurseForge app installs Arc Auras
+# along with it. A site relation only; nothing is added to the zip.
+required-dependencies:
+  - arc-auras
+
 ignore:
   - .git
   - .github

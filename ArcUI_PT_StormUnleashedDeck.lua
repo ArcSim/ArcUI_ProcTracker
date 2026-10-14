@@ -259,7 +259,12 @@ local function ApplyTalentVisibility()
     if PT.ApplyBarTalentVisibility then
         PT.ApplyBarTalentVisibility("stormunleashed", talented)
     end
-    if not talented then
+    -- TRACK only while something CONSUMES this deck: icon, bar, or proc sound.
+    -- Talent alone is not enough -- a talented deck whose output nobody reads
+    -- was still driving MSW's UNIT_AURA handler for nothing. Visibility above
+    -- still follows the talent; this gates the SUBSCRIPTION only.
+    local track = talented and PT.DeckWanted("stormunleashed")
+    if not track then
         suEnabled = false
         PT.MSW.Unsubscribe("OnConsumed", OnMSWConsumed)
     else
@@ -290,6 +295,8 @@ local function TryRegisterDeck()
         chanceSpendSlider = true,
         GetViolations = GetViolations,
         OnReset       = Reset,
+        -- Core calls this when the icon / bar / sound toggles change.
+        OnDemandChanged = function() ApplyTalentVisibility() end,
         OnEnable      = function()
             suEnabled = true
             PT.MSW.Subscribe("OnConsumed", OnMSWConsumed)

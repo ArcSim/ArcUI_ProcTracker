@@ -226,6 +226,46 @@ CreditProc = function(source)
     PT.UpdateDeck("tempest")
 end
 
+-- ── Proc window listener ──────────────────────────────────────────────────────
+-- ONE listener frame serves every consume's 5ms window. This used to create a
+-- new frame on every MSW consume, and WoW never frees a frame, so every spender
+-- cast leaked one for the rest of the session. Each consume still gets its own
+-- watch record (a plain table the garbage collector can reclaim), so two
+-- consumes in the same client frame resolve exactly as they did with one frame
+-- each. The event is registered only while a window is open.
+local openWatches = {}          -- open consume windows, oldest first
+local watchFrame  = CreateFrame("Frame")
+
+watchFrame:SetScript("OnEvent", function(_, _, sid)
+    if issecretvalue and issecretvalue(sid) then return end
+    if tonumber(sid) ~= TEMPEST_BUFF then return end
+    for i = 1, #openWatches do
+        local w = openWatches[i]
+        local age = (GetTime() - w.consumeTime) * 1000
+        local instIDNow = cdm.instID or prevTempInstID
+        if w.firedAt then
+            TDbg("SPELL_UPDATE_CD 454015 IGNORED (already seen)", string.format("age=%.1fms instID=%s", age, SafeVal(instIDNow)))
+        elseif age > 5 then
+            TDbg("SPELL_UPDATE_CD 454015 IGNORED (too late)", string.format("age=%.1fms > 5ms instID=%s", age, SafeVal(instIDNow)))
+        else
+            w.firedAt = GetTime()
+            TDbg("SPELL_UPDATE_CD 454015 COUNTED", string.format("age=%.1fms instID=%s atConsume=%s", age, SafeVal(instIDNow), SafeVal(w.instIDAtConsume)))
+        end
+    end
+end)
+
+local function OpenWatch(w)
+    openWatches[#openWatches + 1] = w
+    if #openWatches == 1 then watchFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN") end
+end
+
+local function CloseWatch(w)
+    for i = #openWatches, 1, -1 do
+        if openWatches[i] == w then table.remove(openWatches, i); break end
+    end
+    if #openWatches == 0 then watchFrame:UnregisterEvent("SPELL_UPDATE_COOLDOWN") end
+end
+
 local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
     if not tempEnabled then return end
     snap.deckNumber   = tempDeckNumber
@@ -242,32 +282,14 @@ local function OnMSWConsumed(stacksSpent, spenderID, ascActive)
         .." deckNow="..tostring(tempDeckNumber)
         .." deckPos="..(tempTotalStacks % DECK_SIZE))
     -- Rule: MSW_CONSUMED + SPELL_UPDATE_CD 454015 fires within same frame = proc
-    local spellCDFiredAt    = nil
     local adInstIDAtConsume = adCDM.instID  -- snapshot for debug logging only
-
-    local spellCDFrame = CreateFrame("Frame")
-    spellCDFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-    local consumeTime = GetTime()
-    spellCDFrame:SetScript("OnEvent", function(self, _, sid)
-        if issecretvalue and issecretvalue(sid) then return end
-        if tonumber(sid) == TEMPEST_BUFF then
-            local age = (GetTime() - consumeTime) * 1000
-            local instIDNow = cdm.instID or prevTempInstID
-            if spellCDFiredAt then
-                TDbg("SPELL_UPDATE_CD 454015 IGNORED (already seen)", string.format("age=%.1fms instID=%s", age, SafeVal(instIDNow)))
-            elseif age > 5 then
-                TDbg("SPELL_UPDATE_CD 454015 IGNORED (too late)", string.format("age=%.1fms > 5ms instID=%s", age, SafeVal(instIDNow)))
-            else
-                spellCDFiredAt = GetTime()
-                TDbg("SPELL_UPDATE_CD 454015 COUNTED", string.format("age=%.1fms instID=%s atConsume=%s", age, SafeVal(instIDNow), SafeVal(instIDAtConsume)))
-            end
-        end
-    end)
+    local w = { consumeTime = GetTime(), instIDAtConsume = instIDAtConsume }  -- firedAt: set by watchFrame
+    OpenWatch(w)
 
     C_Timer.After(0.005, function()
-        spellCDFrame:UnregisterAllEvents()
-        spellCDFrame:SetScript("OnEvent", nil)
+        CloseWatch(w)
         if not tempEnabled then return end
+        local spellCDFiredAt = w.firedAt
         local instIDNow = cdm.instID or prevTempInstID
         -- Debug info only — AD consumed = had instID at consume, now nil
         local adConsumedInWindow = adInstIDAtConsume ~= nil and adCDM.instID == nil
@@ -369,7 +391,12 @@ local function ApplyTalentVisibility()
         if talented then PT.ShowDeckIconIfEnabled("tempest") else entry.widget:Hide() end
     end
     if PT.ApplyBarTalentVisibility then PT.ApplyBarTalentVisibility("tempest", talented) end
-    if not talented then
+    -- TRACK only while something CONSUMES this deck: icon, bar, or proc sound.
+    -- Talent alone is not enough -- a talented deck whose output nobody reads
+    -- was still driving MSW's UNIT_AURA handler for nothing. Visibility above
+    -- still follows the talent; this gates the SUBSCRIPTION only.
+    local track = talented and PT.DeckWanted("tempest")
+    if not track then
         tempEnabled = false
         PT.MSW.Unsubscribe("OnConsumed", OnMSWConsumed)
         -- NOTE: no Reset() here — deck state survives zone/reload
@@ -406,6 +433,8 @@ local function TryRegisterDeck()
         chanceSpendSlider = true,
         GetViolations = GetViolations,
         OnReset       = Reset,
+        -- Core calls this when the icon / bar / sound toggles change.
+        OnDemandChanged = function() ApplyTalentVisibility() end,
         OnEnable      = function()
             tempEnabled = true
             PT.MSW.Subscribe("OnConsumed", OnMSWConsumed)

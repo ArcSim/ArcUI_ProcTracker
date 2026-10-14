@@ -2,8 +2,11 @@
 ## Title: ArcUI ProcTracker
 ## Notes: Deck proc tracking — DW, Tempest, DRE, and more. /pt for options.
 ## Author: Arc
-## Version: 1.4.1
+## Version: 2.0.0
+## IconTexture: Interface\AddOns\ArcUI_ProcTracker\Textures\PT_Icon_400x400
 ## SavedVariables: ArcUI_ProcTrackerDB
+## OptionalDeps: ArcAuras
+## Group: ArcAuras
 ## X-Curse-Project-ID: 1516247
 
 # Libraries
@@ -31,6 +34,7 @@ ArcUI_PT_NaturesGuardian.lua
 ArcUI_PT_DREDeck.lua
 ArcUI_PT_RestoDRE.lua
 ArcUI_PT_SoulburstDeck.lua
+ArcUI_PT_Moving.lua
 ArcUI_PT_TempestDebug.lua
 ArcUI_PT_ElemTempestDebug.lua
 ArcUI_PT_DWDebug.lua

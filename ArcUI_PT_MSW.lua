@@ -66,17 +66,54 @@ PT.MSW.OnExpired  = {}   -- array of functions(instID, stacks)
 PT.MSW.OnGained   = {}   -- array of functions(instID, apps)
 
 -- Subscribe/unsubscribe helpers
+-- ── Demand gating ─────────────────────────────────────────────────────────────
+-- This module watches UNIT_AURA on the player, which fires constantly. It used
+-- to register at file load and never stop, so a Restoration shaman tracking
+-- nothing but Nature's Guardian still paid for every aura change, forever, for
+-- a Maelstrom Weapon counter nothing was reading.
+--
+-- Every consumer already goes through Subscribe/Unsubscribe, so subscriber
+-- count IS the demand signal: no subscribers, no events registered at all --
+-- not "handler returns early", genuinely not firing. RefreshRegistration is
+-- called from both ends, so it can never drift from the real list.
+local mswFrame          -- created below; declared here so the gate can see it
+local mswRegistered = false
+
+local function HasSubscribers()
+    return #PT.MSW.OnConsumed > 0 or #PT.MSW.OnExpired > 0 or #PT.MSW.OnGained > 0
+end
+
+local function RefreshRegistration()
+    if not mswFrame then return end          -- file still loading
+    local want = HasSubscribers()
+    if want == mswRegistered then return end
+    mswRegistered = want
+    if want then
+        mswFrame:RegisterUnitEvent("UNIT_AURA", "player")
+        mswFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    else
+        mswFrame:UnregisterAllEvents()
+    end
+end
+PT.MSW.RefreshRegistration = RefreshRegistration
+PT.MSW.IsTracking = function() return mswRegistered end
+
 function PT.MSW.Subscribe(event, fn)
     local t = PT.MSW[event]
     if not t then return end
     for _, f in ipairs(t) do if f == fn then return end end
     t[#t+1] = fn
+    RefreshRegistration()
 end
 function PT.MSW.Unsubscribe(event, fn)
     local t = PT.MSW[event]
     if not t then return end
     for i, f in ipairs(t) do
-        if f == fn then table.remove(t, i); return end
+        if f == fn then
+            table.remove(t, i)
+            RefreshRegistration()
+            return
+        end
     end
 end
 
@@ -146,9 +183,11 @@ local function FireConsumeOrExpire(stacksSpent, aidGone)
 end
 
 -- ── Event frame ───────────────────────────────────────────────────────────────
-local mswFrame = CreateFrame("Frame")
-mswFrame:RegisterUnitEvent("UNIT_AURA", "player")
-mswFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+-- Deliberately created with NO events registered. RefreshRegistration turns them
+-- on the moment something subscribes, and off again when the last one leaves.
+mswFrame = CreateFrame("Frame")
+
+RefreshRegistration()   -- arm now if a deck subscribed before this line ran
 
 mswFrame:SetScript("OnEvent", function(_, event, a1, a2, a3)
 
