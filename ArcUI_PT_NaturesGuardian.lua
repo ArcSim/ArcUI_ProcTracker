@@ -50,6 +50,10 @@ local NG = PT.NaturesGuardian
 -- Mirrors how the Tempest decks gate themselves: ask the trait tree, not the
 -- spellbook, so it is correct the instant a talent swap lands.
 local function HasNGTalent()
+    local _, class = UnitClass("player")
+    if class ~= "SHAMAN" then return false end
+    -- The passive spell is stable across talent-tree node/entry changes.
+    if IsPlayerSpell and IsPlayerSpell(30884) then return true end
     local cfgID = C_ClassTalents and C_ClassTalents.GetActiveConfigID
                   and C_ClassTalents.GetActiveConfigID()
     if not cfgID then return false end
@@ -260,5 +264,6 @@ PT.RegisterDeck({
         ApplyTalentVisibility()
         Refresh()
     end,
+    CanShow     = HasNGTalent,
     ns          = NG,
 })

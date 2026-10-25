@@ -2936,6 +2936,7 @@ PT.OnEnterWorld = {}  -- array of functions — deck modules subscribe to retry 
 --   GetDeckPos  = function() return currentPos end,   -- 0-based position in deck
 --   GetProcs    = function() return currentProcs end, -- completed procs this deck
 --   OnReset     = function() ... end,  -- called when user hits Reset Deck
+--   CanShow     = function() return true end, -- optional display eligibility gate
 --   OnEnable    = function() ... end,  -- called after widget is built
 -- }
 function PT.RegisterDeck(def)
@@ -3062,7 +3063,8 @@ function PT.ShowDeckIconIfEnabled(id)
     local entry = registryMap[id]
     if not entry or not entry.widget then return end
     local idb = IconDB(id)
-    if idb.deckEnabled ~= false and CombatAllowsIcon(idb) then
+    if idb.deckEnabled ~= false and CombatAllowsIcon(idb)
+       and (not entry.CanShow or entry.CanShow()) then
         entry.widget:Show()
     end
 end
@@ -3079,7 +3081,11 @@ function PT.RefreshCombatVisibility()
             if idb.hideOOC then
                 if shouldShow then
                     w._ptHiddenByOOC = nil
-                    if idb.deckEnabled ~= false then w:Show() end
+                    if idb.deckEnabled ~= false and (not entry.CanShow or entry.CanShow()) then
+                        w:Show()
+                    else
+                        w:Hide()
+                    end
                 else
                     w._ptHiddenByOOC = true
                     w:Hide()
@@ -3088,7 +3094,11 @@ function PT.RefreshCombatVisibility()
                 -- Option was turned off while we had it hidden: undo OUR hide
                 -- only, never anything hidden by deckEnabled or talent gating.
                 w._ptHiddenByOOC = nil
-                if idb.deckEnabled ~= false then w:Show() end
+                if idb.deckEnabled ~= false and (not entry.CanShow or entry.CanShow()) then
+                    w:Show()
+                else
+                    w:Hide()
+                end
             end
         end
         if PT.ApplyBarVisibility then
